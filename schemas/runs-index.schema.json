@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "runs-index.schema.json",
+  "title": "RunsIndex",
+  "type": "object",
+  "required": ["version", "updated_at", "runs"],
+  "properties": {
+    "version": { "const": 1 },
+    "updated_at": { "type": "string", "format": "date-time" },
+    "runs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "project", "suite", "environment", "status", "started_at", "dir"],
+        "properties": {
+          "id": { "type": "string" },
+          "project": { "type": "string" },
+          "suite": { "type": "string" },
+          "environment": { "type": "string" },
+          "status": { "type": "string", "enum": ["passed", "failed", "error"] },
+          "started_at": { "type": "string", "format": "date-time" },
+          "dir": { "type": "string", "description": "Relative path from repo root" }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

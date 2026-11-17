@@ -1,0 +1,10 @@
+name: get-status
+description: Smoke check via httpbin
+request:
+  method: GET
+  url: "{{base_url}}/status/200"
+assertions:
+  - type: status
+    equals: 200
+  - type: duration_ms
+    max: 10000

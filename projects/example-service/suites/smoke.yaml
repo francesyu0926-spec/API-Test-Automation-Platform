@@ -1,0 +1,4 @@
+name: smoke
+description: Minimal smoke suite
+cases:
+  - get-status

@@ -1,0 +1,26 @@
+# Secrets and local overrides
+**/*.local.yaml
+**/*.local.json
+.env
+.env.*
+
+# Runtime output (optional: commit summaries only)
+runs/
+captures/
+
+# Electron desktop
+desktop/node_modules/
+desktop/out/
+desktop/dist/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

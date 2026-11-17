@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "capture-transaction.schema.json",
+  "title": "CaptureTransaction",
+  "type": "object",
+  "required": ["id", "session_id", "captured_at", "request", "response"],
+  "properties": {
+    "id": { "type": "string" },
+    "session_id": { "type": "string" },
+    "captured_at": { "type": "string", "format": "date-time" },
+    "request": {
+      "type": "object",
+      "required": ["method", "url"],
+      "properties": {
+        "method": { "type": "string" },
+        "url": { "type": "string" },
+        "headers": { "type": "object", "additionalProperties": { "type": "string" } },
+        "body": {}
+      }
+    },
+    "response": {
+      "type": "object",
+      "properties": {
+        "status": { "type": "integer" },
+        "headers": { "type": "object", "additionalProperties": { "type": "string" } },
+        "body": {},
+        "duration_ms": { "type": "number" }
+      }
+    },
+    "tags": { "type": "array", "items": { "type": "string" } }
+  },
+  "additionalProperties": false
+}

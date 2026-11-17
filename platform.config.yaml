@@ -1,0 +1,28 @@
+# Platform-wide settings (no database; all state in files under this repo)
+
+root: .
+
+# Default project when -p is omitted
+default_project: example-service
+
+# Proxy capture (optional): mitm addon or local ingest URL
+capture:
+  ingest_host: 127.0.0.1
+  ingest_port: 8765
+  body_max_bytes: 65536
+  redact_headers:
+    - authorization
+    - cookie
+    - set-cookie
+  redact_json_paths:
+    - $.password
+    - $.token
+
+# Execution
+run:
+  step_timeout_seconds: 30
+  http_verify_ssl: true
+
+# Index maintenance: only one writer should update */index.json at a time
+index:
+  atomic_suffix: .tmp
