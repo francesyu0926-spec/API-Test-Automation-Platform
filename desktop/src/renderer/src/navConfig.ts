@@ -1,4 +1,4 @@
-export type AppTab = "api" | "load" | "capture" | "projects" | "runs";
+export type AppTab = "api" | "load" | "capture" | "projects" | "suite" | "runs";
 
 export const APP_TABS: {
   id: AppTab;
@@ -17,6 +17,15 @@ export const NAV_GROUP_LABELS: Record<(typeof APP_TABS)[number]["group"], string
   dev: "开发与压测",
   assets: "资产与流量",
   auto: "自动化",
+};
+
+export const TAB_DESCRIPTIONS: Record<AppTab, string> = {
+  api: "调试 HTTP / WebSocket 请求，管理集合与环境变量。",
+  load: "内置压测与 JMeter JMX / JTL 工作流，一键查看聚合与 Dashboard。",
+  capture: "Mitm 抓包、生成用例并回灌到工作台或项目。",
+  projects: "管理 YAML 用例、环境与 API 集合资产。",
+  suite: "按套件批量执行用例并查看本次结果。",
+  runs: "浏览历史执行记录与逐步断言详情。",
 };
 
 const TAB_STORAGE_KEY = "atp:lastTab";

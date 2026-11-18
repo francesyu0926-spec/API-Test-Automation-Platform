@@ -8,7 +8,13 @@ import LoadTestPanel from "./LoadTestPanel";
 import ConfirmDialog from "./ConfirmDialog";
 import LoadingOverlay from "./LoadingOverlay";
 import PanelErrorBoundary from "./PanelErrorBoundary";
+import RunDetailPanel from "./RunDetailPanel";
+import RunSuitePanel from "./RunSuitePanel";
+import { resolveSuiteRunCaseIds, type SuiteRunTarget } from "./resolveSuiteRunTargets";
+import RunsHistoryTable from "./RunsHistoryTable";
 import ProjectEmptyState from "./ProjectEmptyState";
+import AppModuleChrome from "./AppModuleChrome";
+import AppToast from "./AppToast";
 import { APP_TABS, NAV_GROUP_LABELS, loadPersistedTab, persistTab, type AppTab } from "./navConfig";
 import { useAppNotify } from "./useAppNotify";
 import type { WorkbenchDraft } from "../../shared/apiWorkbenchTypes";
@@ -20,7 +26,7 @@ type RunRow = Awaited<ReturnType<typeof window.atp.listRuns>>[number];
 
 export default function App() {
   const [tab, setTab] = useState<AppTab>(() => loadPersistedTab() ?? "api");
-  const { toast, notify } = useAppNotify();
+  const { toast, notify, clearToast } = useAppNotify();
   const [projects, setProjects] = useState<Project[]>([]);
   const [runs, setRuns] = useState<RunRow[]>([]);
   const [selectedProject, setSelectedProject] = useState<string>("");
@@ -30,7 +36,12 @@ export default function App() {
     null,
   );
   const [running, setRunning] = useState(false);
-  const [runLog, setRunLog] = useState("");
+  const [lastSuiteRun, setLastSuiteRun] = useState<{
+    summary: unknown | null;
+    steps: unknown[];
+    stderr?: string;
+    rawLog?: string;
+  } | null>(null);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [runDetail, setRunDetail] = useState<{ summary: unknown; steps: unknown[] } | null>(null);
   const [workbenchDraft, setWorkbenchDraft] = useState<WorkbenchDraft | null>(null);
@@ -42,6 +53,7 @@ export default function App() {
   const [loadTestDraft, setLoadTestDraft] = useState<WorkbenchDraft | null>(null);
   const [loadTestEnv, setLoadTestEnv] = useState<string>("dev");
   const [loadTestVars, setLoadTestVars] = useState<Record<string, string> | null>(null);
+  const [workbenchFromLoadTest, setWorkbenchFromLoadTest] = useState(false);
   const [createProjectOpen, setCreateProjectOpen] = useState(false);
   const [createProjectBaseUrlHint, setCreateProjectBaseUrlHint] = useState<string | undefined>();
   const [bootLoading, setBootLoading] = useState(true);
@@ -52,9 +64,10 @@ export default function App() {
   const [projectCollections, setProjectCollections] = useState<
     Array<{ id: string; name: string; requestCount: number }>
   >([]);
+  const [suiteTargetsReload, setSuiteTargetsReload] = useState(0);
 
   const refreshRuns = useCallback(async () => {
-    const list = await window.atp.listRuns({ limit: 30 });
+    const list = await window.atp.listRuns({ limit: 200 });
     setRuns(list);
   }, []);
 
@@ -175,7 +188,10 @@ export default function App() {
               ? projectCaseContext.yaml
               : await window.atp.readFile(`projects/${selectedProject}/cases/${openName}.yaml`);
           const draft = text ? caseYamlToWorkbenchDraft(text) : null;
-          if (draft) setWorkbenchDraft(draft);
+          if (draft) {
+            setWorkbenchFromLoadTest(false);
+            setWorkbenchDraft(draft);
+          }
         }
         goTab("api");
         const failHint = res.failed.length ? `，${res.failed.length} 个解析失败` : "";
@@ -218,16 +234,65 @@ export default function App() {
   const needsProject = tab === "api" || tab === "load" || tab === "capture";
   const projectReady = Boolean(selectedProject);
 
-  const onRun = async () => {
+  const onRun = async (targets: SuiteRunTarget[]) => {
     if (!selectedProject) return;
+    if (!targets.length) {
+      notify("请至少选择一个用例");
+      return;
+    }
     setRunning(true);
-    setRunLog("");
-    const result = await window.atp.runSuite({ project: selectedProject, suite, env });
-    setRunLog(
-      [result.stdout, result.stderr].filter(Boolean).join("\n") ||
-        (result.code === 0 ? "执行成功" : "执行失败"),
-    );
+    setLastSuiteRun(null);
+    const caseIds = await resolveSuiteRunCaseIds(selectedProject, suite, targets);
+    if (!caseIds.length) {
+      notify("无法解析所选请求，请检查集合数据");
+      setRunning(false);
+      return;
+    }
+    const result = await window.atp.runSuite({
+      project: selectedProject,
+      suite,
+      env,
+      cases: caseIds,
+    });
+    const stderr = result.stderr?.trim();
+    const stdout = result.stdout?.trim() ?? "";
+    let runView: typeof lastSuiteRun = null;
+    try {
+      if (stdout.startsWith("{")) {
+        const brief = JSON.parse(stdout) as { id?: string; status?: string };
+        if (brief.id) {
+          const detail = await window.atp.getRunDetail(brief.id);
+          if (detail.summary) {
+            runView = {
+              summary: detail.summary,
+              steps: detail.steps,
+              stderr: stderr || undefined,
+            };
+          } else {
+            runView = { summary: brief, steps: [], stderr: stderr || undefined };
+          }
+        }
+      }
+    } catch {
+      // 非 JSON 输出，走下方降级展示
+    }
+    if (!runView) {
+      const raw = [stdout, stderr].filter(Boolean).join("\n");
+      runView = {
+        summary: null,
+        steps: [],
+        stderr: stderr || undefined,
+        rawLog: raw || (result.code === 0 ? "执行成功" : "执行失败"),
+      };
+    } else if (runView.summary && typeof runView.summary === "object") {
+      const st = (runView.summary as { status?: string }).status;
+      if (st === "passed") notify("套件执行通过");
+      else if (st === "failed") notify("套件执行完成，存在失败用例");
+    }
+    setLastSuiteRun(runView);
     setRunning(false);
+    await refreshAssets();
+    setSuiteTargetsReload((n) => n + 1);
     await refreshRuns();
   };
 
@@ -262,6 +327,20 @@ export default function App() {
     }
   };
 
+  const onRunsDeleted = (deletedIds: string[]) => {
+    void (async () => {
+      const list = await window.atp.listRuns({ limit: 200 });
+      setRuns(list);
+      if (
+        selectedRunId &&
+        (deletedIds.includes(selectedRunId) || !list.some((r) => r.id === selectedRunId))
+      ) {
+        setSelectedRunId(null);
+        setRunDetail(null);
+      }
+    })();
+  };
+
   const submitCreateProject = (opts: { id: string; name: string; baseUrl: string }) => {
     void (async () => {
       const res = await window.atp.createProject(opts);
@@ -281,8 +360,19 @@ export default function App() {
 
   return (
     <div className="layout">
-      <aside className="sidebar">
-        <div className="brand">API Test Platform</div>
+      <a className="skip-to-main" href="#app-main">
+        跳到主内容
+      </a>
+      <aside className="sidebar sidebar--fin">
+        <div className="sidebar-brand-head">
+          <span className="sidebar-brand-mark" aria-hidden>
+            ATP
+          </span>
+          <div className="sidebar-brand-copy">
+            <span className="sidebar-brand-title">API Test Platform</span>
+            <span className="sidebar-brand-sub">接口与压测工作台</span>
+          </div>
+        </div>
 
         <div className="sidebar-workspace">
             <span className="sidebar-workspace-label">工作区项目</span>
@@ -318,11 +408,16 @@ export default function App() {
             ) : null}
         </div>
 
-        <nav className="sidebar-nav" aria-label="主功能">
-          {(["dev", "assets", "auto"] as const).map((group) => (
+        <nav className="sidebar-nav sidebar-nav--fin" aria-label="主功能">
+          {(["dev", "assets", "auto"] as const).map((group) => {
+            const groupActive = APP_TABS.some((t) => t.group === group && t.id === tab);
+            return (
             <div key={group} className="sidebar-nav-group">
-              <div className="nav-section">{NAV_GROUP_LABELS[group]}</div>
-              <div className="sidebar-nav-items">
+              <div className={`nav-section nav-section--fin${groupActive ? " nav-section--active" : ""}`}>
+                <span className="nav-section-glyph" aria-hidden />
+                {NAV_GROUP_LABELS[group]}
+              </div>
+              <div className="sidebar-nav-items sidebar-nav-items--fin">
                 {APP_TABS.filter((t) => t.group === group).map((t) => (
                   <button
                     key={t.id}
@@ -340,13 +435,25 @@ export default function App() {
                 ))}
               </div>
             </div>
-          ))}
+          );
+          })}
         </nav>
 
         <p className="sidebar-foot-hint">项目与工作区在全部模块共用</p>
+        <button
+          type="button"
+          className="nav-btn nav-btn--compact sidebar-network-restore"
+          title="南财等客户端卡在 SFConnecting 时：关闭残留抓包代理并重置 WinHTTP"
+          onClick={() => {
+            void window.atp.restoreNetworkOnly().then((r) => notify(r.message));
+          }}
+        >
+          恢复上网（桌面终端）
+        </button>
       </aside>
 
       <main
+        id="app-main"
         className={`main loading-host${tab === "api" ? " main--workbench" : ""}${tab === "load" ? " main--workbench" : ""}`}
       >
         <LoadingOverlay show={bootLoading} label="加载工作台…" />
@@ -362,11 +469,11 @@ export default function App() {
             onGoProjects={() => goTab("projects")}
           />
         )}
-        {tab === "runs" && (
+        {tab === "suite" && (
           <>
-            <h2 className="page-head">执行记录</h2>
-            <Card title="运行套件">
-              <RunToolbar
+            <AppModuleChrome tab="suite" projectId={selectedProject} projectName={selectedProjectName} />
+            <Card title="套件与用例">
+              <RunSuitePanel
                 projects={projects}
                 selectedProject={selectedProject}
                 onProject={setSelectedProject}
@@ -376,52 +483,76 @@ export default function App() {
                 onSuite={setSuite}
                 onEnv={setEnv}
                 running={running}
-                onRun={onRun}
+                reloadKey={suiteTargetsReload}
+                onRun={(items) => void onRun(items)}
               />
-              {runLog && (
-                <pre className="card" style={{ marginTop: 12 }}>
-                  {runLog}
-                </pre>
-              )}
             </Card>
 
+            {lastSuiteRun ? (
+              <Card title="本次执行结果">
+                {lastSuiteRun.summary ? (
+                  <>
+                    <RunDetailPanel
+                      summary={lastSuiteRun.summary}
+                      steps={lastSuiteRun.steps}
+                      projectNames={Object.fromEntries(projects.map((p) => [p.id, p.name]))}
+                    />
+                    <div className="run-suite-result-footer">
+                      {typeof lastSuiteRun.summary === "object" &&
+                      lastSuiteRun.summary &&
+                      "id" in lastSuiteRun.summary &&
+                      typeof (lastSuiteRun.summary as { id: string }).id === "string" ? (
+                        <button
+                          type="button"
+                          className="nav-btn"
+                          onClick={() => void openRun((lastSuiteRun.summary as { id: string }).id)}
+                        >
+                          在执行记录中打开
+                        </button>
+                      ) : null}
+                    </div>
+                  </>
+                ) : (
+                  <p className="hint run-suite-run-fallback-title">无法解析结构化结果，以下为原始输出。</p>
+                )}
+                {lastSuiteRun.stderr ? (
+                  <pre className="run-suite-run-stderr" role="alert">
+                    {lastSuiteRun.stderr}
+                  </pre>
+                ) : null}
+                {!lastSuiteRun.summary && lastSuiteRun.rawLog ? (
+                  <pre className="run-suite-run-fallback">{lastSuiteRun.rawLog}</pre>
+                ) : null}
+              </Card>
+            ) : null}
+          </>
+        )}
+
+        {tab === "runs" && (
+          <>
+            <AppModuleChrome tab="runs" projectId={selectedProject} projectName={selectedProjectName} />
             <Card title="最近执行">
-              <table>
-                <thead>
-                  <tr>
-                    <th>时间</th>
-                    <th>状态</th>
-                    <th>项目</th>
-                    <th>套件</th>
-                    <th>环境</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {runs.map((r) => (
-                    <tr key={r.id} className="clickable" onClick={() => void openRun(r.id)}>
-                      <td>{r.started_at}</td>
-                      <td>
-                        <span className={`badge ${r.status}`}>{r.status}</span>
-                      </td>
-                      <td>{r.project}</td>
-                      <td>{r.suite}</td>
-                      <td>{r.environment}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+              <RunsHistoryTable
+                runs={runs}
+                projects={projects.map((p) => ({ id: p.id, name: p.name }))}
+                selectedRunId={selectedRunId}
+                onSelect={(id) => void openRun(id)}
+                onRunsDeleted={onRunsDeleted}
+                onNotify={notify}
+              />
             </Card>
 
             {selectedRunId && (
               <Card title={`详情 · ${selectedRunId}`}>
-                <div className="loading-host" style={{ minHeight: 120 }}>
+                <div className="loading-host run-detail-host">
                   <LoadingOverlay show={runDetailLoading} label="加载执行详情…" />
-                  {runDetail?.summary && (
-                    <div className="grid-2">
-                      <pre>{JSON.stringify(runDetail.summary, null, 2)}</pre>
-                      <pre>{JSON.stringify(runDetail.steps, null, 2)}</pre>
-                    </div>
-                  )}
+                  {runDetail?.summary && !runDetailLoading ? (
+                    <RunDetailPanel
+                      summary={runDetail.summary}
+                      steps={runDetail.steps}
+                      projectNames={Object.fromEntries(projects.map((p) => [p.id, p.name]))}
+                    />
+                  ) : null}
                 </div>
               </Card>
             )}
@@ -429,9 +560,10 @@ export default function App() {
         )}
 
         {tab === "projects" && (
-          <>
-            <h2 className="page-head">项目与用例</h2>
+          <div className="projects-tab-host">
             {projects.length === 0 ? (
+              <>
+              <h2 className="page-head">项目与用例</h2>
               <section className="card panel-empty-card">
                 <div className="panel-empty-state">
                   <div className="panel-empty-icon" aria-hidden>
@@ -454,10 +586,43 @@ export default function App() {
                   </button>
                 </div>
               </section>
+              </>
             ) : (
               <>
-                <div className="toolbar project-toolbar">
-                  <label className="project-select-wrap">
+                <header className="projects-top-card" aria-label="项目与用例">
+                  <div className="projects-top-row">
+                    <h2 className="projects-page-title">项目与用例</h2>
+                    <div className="projects-top-actions">
+                      <button
+                        type="button"
+                        className="nav-btn nav-btn--compact"
+                        onClick={() => {
+                          setCreateProjectBaseUrlHint(undefined);
+                          setCreateProjectOpen(true);
+                        }}
+                      >
+                        新建项目
+                      </button>
+                      <button
+                        type="button"
+                        className="nav-btn nav-btn--compact"
+                        disabled={!selectedProject || projectDeleteBusy}
+                        onClick={() => setPendingProjectDelete(true)}
+                      >
+                        删除项目
+                      </button>
+                      <button
+                        type="button"
+                        className="primary"
+                        disabled={!selectedProject}
+                        title="将全部 YAML 用例导入默认模块"
+                        onClick={() => openApiWorkbench()}
+                      >
+                        打开工作台
+                      </button>
+                    </div>
+                  </div>
+                  <label className="project-select-wrap projects-top-select">
                     <span className="project-select-label">当前项目</span>
                     <select
                       value={selectedProject}
@@ -476,65 +641,38 @@ export default function App() {
                       ))}
                     </select>
                   </label>
-                  <button
-                    type="button"
-                    className="nav-btn"
-                    onClick={() => {
-                      setCreateProjectBaseUrlHint(undefined);
-                      setCreateProjectOpen(true);
-                    }}
-                  >
-                    新建项目
-                  </button>
-                  <button
-                    type="button"
-                    className="nav-btn"
-                    disabled={!selectedProject || projectDeleteBusy}
-                    onClick={() => setPendingProjectDelete(true)}
-                  >
-                    删除项目
-                  </button>
-                </div>
-                {selectedProject && (
-                  <section className="card project-overview-card">
-                    <div className="project-overview-head">
-                      <div>
-                        <h3 className="project-overview-title">
-                          {projects.find((p) => p.id === selectedProject)?.name ?? selectedProject}
-                        </h3>
-                        <p className="project-overview-meta">
-                          目录 ID：<code>{selectedProject}</code>
-                          {assets
-                            ? ` · 环境 ${assets.environments.length} · 套件 ${assets.suites.length} · 用例 ${assets.cases.length}`
-                            : ""}
-                        </p>
-                      </div>
-                      <button
-                        type="button"
-                        className="nav-btn"
-                        title="将全部 YAML 用例导入默认模块，并在编辑器打开当前选中的用例"
-                        onClick={() => openApiWorkbench()}
-                      >
-                        打开工作台
-                      </button>
-                    </div>
-                    {projectCollections.length > 0 && (
-                      <p className="project-overview-collections">
-                        API 集合：{" "}
-                        {projectCollections.map((c) => `${c.name}（${c.requestCount} 条）`).join(" · ")}
-                        <span className="project-overview-note">（集合在 API 工作台管理；本页主要管理 YAML 用例）</span>
-                      </p>
-                    )}
-                  </section>
-                )}
+                  {selectedProject && (
+                    <p className="projects-top-meta" aria-label="项目概览">
+                      <code>{selectedProject}</code>
+                      {assets ? (
+                        <>
+                          <span className="projects-top-meta-sep">·</span>
+                          环境 {assets.environments.length}
+                          <span className="projects-top-meta-sep">·</span>
+                          套件 {assets.suites.length}
+                          <span className="projects-top-meta-sep">·</span>
+                          <strong>用例 {assets.cases.length}</strong>
+                        </>
+                      ) : null}
+                      {projectCollections.map((c) => (
+                        <span key={c.id}>
+                          <span className="projects-top-meta-sep">·</span>
+                          {c.name} {c.requestCount} 请求
+                        </span>
+                      ))}
+                    </p>
+                  )}
+                </header>
                 <div className="loading-host projects-panel-host">
                   <LoadingOverlay show={assetsLoading && !bootLoading} label="加载项目资源…" />
                   <CasesPanel
                     project={selectedProject}
+                    projectDisplayName={projects.find((p) => p.id === selectedProject)?.name}
                     cases={assets?.cases ?? []}
                     onRefresh={() => void refreshAssets()}
                     onCasePreviewChange={handleCasePreviewChange}
                     onOpenInWorkbench={(draft) => {
+                      setWorkbenchFromLoadTest(false);
                       setWorkbenchDraft(draft);
                       goTab("api");
                     }}
@@ -542,17 +680,19 @@ export default function App() {
                 </div>
               </>
             )}
-          </>
+          </div>
         )}
 
         {tab === "capture" && projectReady && (
           <PanelErrorBoundary name="capture">
+            <AppModuleChrome tab="capture" projectId={selectedProject} projectName={selectedProjectName} />
             <CapturePanel
               project={selectedProject}
               projectName={selectedProjectName}
               onCaseSaved={() => void refreshAssets()}
               onGoToProjects={() => goTab("projects")}
               onOpenInWorkbench={(draft) => {
+                setWorkbenchFromLoadTest(false);
                 setWorkbenchDraft(draft);
                 goTab("api");
               }}
@@ -562,21 +702,25 @@ export default function App() {
 
         {tab === "api" && projectReady && (
           <PanelErrorBoundary name="api-workbench">
-          <ApiWorkbench
-            project={selectedProject}
-            projectName={selectedProjectName}
-            externalDraft={workbenchDraft}
-            collectionReloadNonce={workbenchCollectionNonce}
-            onConsumeExternalDraft={consumeWorkbenchDraft}
-            onCaseSaved={() => void refreshAssets()}
-            onRequestCreateProject={(hint) => openCreateProject(hint)}
-            onSendToLoadTest={({ draft, envName, variables }) => {
-              setLoadTestDraft(draft);
-              setLoadTestEnv(envName);
-              setLoadTestVars(variables);
-              goTab("load");
-            }}
-          />
+            <ApiWorkbench
+              project={selectedProject}
+              projects={projects}
+              onProjectChange={setSelectedProject}
+              externalDraft={workbenchDraft}
+              collectionReloadNonce={workbenchCollectionNonce}
+              onConsumeExternalDraft={consumeWorkbenchDraft}
+              onCaseSaved={() => void refreshAssets()}
+              onRequestCreateProject={(hint) => openCreateProject(hint)}
+              applyToLoadTest={workbenchFromLoadTest}
+              onSendToLoadTest={({ draft, envName, variables }) => {
+                setWorkbenchFromLoadTest(false);
+                setLoadTestDraft(draft);
+                setLoadTestEnv(envName);
+                setLoadTestVars(variables);
+                goTab("load");
+                notify("已应用当前请求到负载测试");
+              }}
+            />
           </PanelErrorBoundary>
         )}
 
@@ -584,6 +728,7 @@ export default function App() {
           <LoadTestPanel
             project={selectedProject}
             projectName={selectedProjectName}
+            onNotify={notify}
             externalDraft={loadTestDraft}
             externalEnvName={loadTestEnv}
             externalVariables={loadTestVars}
@@ -591,16 +736,19 @@ export default function App() {
               setLoadTestDraft(null);
               setLoadTestVars(null);
             }}
+            onEditInWorkbench={({ draft, envName, variables }) => {
+              setWorkbenchFromLoadTest(true);
+              setLoadTestEnv(envName);
+              setLoadTestVars({ ...variables });
+              setWorkbenchDraft(draft);
+              goTab("api");
+              notify("已在工作台打开；编辑 Headers/Params 后点「应用到压测」");
+            }}
           />
         )}
       </main>
 
-      {toast ? (
-        <div className="app-toast app-toast--global" role="status">
-          <span className="app-toast-dot" />
-          {toast}
-        </div>
-      ) : null}
+      {toast ? <AppToast text={toast.text} kind={toast.kind} onDismiss={clearToast} /> : null}
 
       <CreateProjectDialog
         open={createProjectOpen}
@@ -630,48 +778,5 @@ function Card({ title, children }: { title: string; children: ReactNode }) {
       <h3 className="card-title">{title}</h3>
       {children}
     </section>
-  );
-}
-
-function RunToolbar(props: {
-  projects: Project[];
-  selectedProject: string;
-  onProject: (v: string) => void;
-  suite: string;
-  env: string;
-  assets: { environments: string[]; suites: string[]; cases: string[] } | null;
-  onSuite: (v: string) => void;
-  onEnv: (v: string) => void;
-  running: boolean;
-  onRun: () => void;
-}) {
-  const { projects, selectedProject, onProject, suite, env, assets, onSuite, onEnv, running, onRun } = props;
-  return (
-    <div className="toolbar">
-      <select value={selectedProject} onChange={(e) => onProject(e.target.value)}>
-        {projects.map((p) => (
-          <option key={p.id} value={p.id}>
-            {p.name}
-          </option>
-        ))}
-      </select>
-      <select value={suite} onChange={(e) => onSuite(e.target.value)}>
-        {(assets?.suites ?? [suite]).map((s) => (
-          <option key={s} value={s}>
-            {s}
-          </option>
-        ))}
-      </select>
-      <select value={env} onChange={(e) => onEnv(e.target.value)}>
-        {(assets?.environments ?? [env]).map((e) => (
-          <option key={e} value={e}>
-            {e}
-          </option>
-        ))}
-      </select>
-      <button type="button" className="primary" disabled={running || !selectedProject} onClick={() => void onRun()}>
-        {running ? "执行中…" : "运行套件"}
-      </button>
-    </div>
   );
 }

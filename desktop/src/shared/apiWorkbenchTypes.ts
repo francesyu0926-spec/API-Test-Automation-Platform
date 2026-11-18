@@ -75,6 +75,10 @@ export type HttpBenchmarkStats = {
   rps: number;
   latency: HttpBenchmarkLatencyStats;
   statusCodes: Record<string, number>;
+  /** 响应体累计字节（不含预热） */
+  bytesReceived?: number;
+  /** 请求发送侧估算字节（不含预热） */
+  bytesSent?: number;
 };
 
 export type HttpBenchmarkReport = {

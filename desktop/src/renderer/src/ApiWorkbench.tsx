@@ -31,9 +31,12 @@ import {
 } from "./workbenchWsHint";
 import { applyImportedCurlAuth, unresolvedWorkbenchVars } from "./samplerAuth";
 
+type ProjectOption = { id: string; name: string };
+
 type Props = {
   project: string;
-  projectName: string;
+  projects: ProjectOption[];
+  onProjectChange: (projectId: string) => void;
   externalDraft: WorkbenchDraft | null;
   collectionReloadNonce?: number;
   onConsumeExternalDraft: () => void;
@@ -44,6 +47,8 @@ type Props = {
     envName: string;
     variables: Record<string, string>;
   }) => void;
+  /** 从负载测试跳入时，发送按钮文案为「应用到压测」 */
+  applyToLoadTest?: boolean;
 };
 
 type ReqTab = "params" | "headers" | "body";
@@ -67,13 +72,15 @@ function formatWsTime(): string {
 
 export default function ApiWorkbench({
   project,
-  projectName,
+  projects,
+  onProjectChange,
   externalDraft,
   collectionReloadNonce = 0,
   onConsumeExternalDraft,
   onCaseSaved,
   onRequestCreateProject,
   onSendToLoadTest,
+  applyToLoadTest,
 }: Props) {
   const [collections, setCollections] = useState<Awaited<ReturnType<typeof window.atp.listCollections>>>([]);
   const [collectionId, setCollectionId] = useState("default");
@@ -130,6 +137,8 @@ export default function ApiWorkbench({
   const consumeExternalDraftRef = useRef(onConsumeExternalDraft);
   consumeExternalDraftRef.current = onConsumeExternalDraft;
   const externalDraftGenRef = useRef(0);
+  const projectScopeRef = useRef(project);
+  projectScopeRef.current = project;
 
   const showToast = (text: string) => {
     setToast(text);
@@ -137,15 +146,18 @@ export default function ApiWorkbench({
   };
 
   const loadCollections = useCallback(async () => {
-    if (!project) return;
-    const list = await window.atp.listCollections(project);
+    const pid = project;
+    if (!pid) return;
+    const list = await window.atp.listCollections(pid);
+    if (projectScopeRef.current !== pid) return;
     setCollections(list);
     if (!list.some((c) => c.id === collectionId) && list.length) {
       setCollectionId(list[0].id);
     }
     if (!list.length) {
-      await window.atp.ensureCollection(project, "default");
-      const again = await window.atp.listCollections(project);
+      await window.atp.ensureCollection(pid, "default");
+      const again = await window.atp.listCollections(pid);
+      if (projectScopeRef.current !== pid) return;
       setCollections(again);
     }
   }, [project, collectionId]);
@@ -177,17 +189,21 @@ export default function ApiWorkbench({
   }, [project, collections, collectionId, effectiveCollectionId]);
 
   const loadCollection = useCallback(async () => {
-    if (!project || !effectiveCollectionId) return;
+    const pid = project;
+    const cid = effectiveCollectionId;
+    if (!pid || !cid) return;
     setWorkbenchLoading(true);
     try {
-      const doc = await window.atp.getCollection(project, effectiveCollectionId);
+      const doc = await window.atp.getCollection(pid, cid);
+      if (projectScopeRef.current !== pid) return;
       if (doc) setCollection(doc);
       else {
-        const created = await window.atp.ensureCollection(project, effectiveCollectionId);
+        const created = await window.atp.ensureCollection(pid, cid);
+        if (projectScopeRef.current !== pid) return;
         setCollection(created);
       }
     } finally {
-      setWorkbenchLoading(false);
+      if (projectScopeRef.current === pid) setWorkbenchLoading(false);
     }
   }, [project, effectiveCollectionId]);
 
@@ -230,6 +246,17 @@ export default function ApiWorkbench({
     setWsConnecting(false);
     setWsLog([]);
   }, []);
+
+  useEffect(() => {
+    setCollections([]);
+    setCollection(null);
+    setCollectionId("default");
+    setSaveTargetCollectionId("default");
+    setActiveRequestId(null);
+    setDraft(defaultDraft());
+    setResponse(null);
+    resetWsSession();
+  }, [project, resetWsSession]);
 
   useEffect(() => {
     const unsub = window.atp.onWsEvent((ev: WsEvent) => {
@@ -805,11 +832,37 @@ export default function ApiWorkbench({
   return (
     <div className="workbench">
       <header className="workbench-topbar">
-        <div className="module-head-row">
+        <div className="module-head-row workbench-head-row">
           <h2 className="page-head workbench-title">API 工作台</h2>
-          <span className="module-context-chip" title={`项目 ID：${project}`}>
-            {projectName || project}
-          </span>
+          <div className="workbench-project-switch">
+            <span className="workbench-topbar-label">项目</span>
+            <select
+              className="workbench-topbar-control workbench-topbar-control--project"
+              value={project}
+              disabled={!projects.length}
+              onChange={(e) => {
+                const next = e.target.value;
+                if (next && next !== project) onProjectChange(next);
+              }}
+              aria-label="项目"
+              title={project ? `项目 ID：${project}` : "选择项目"}
+            >
+              {!projects.length ? (
+                <option value="">暂无项目</option>
+              ) : (
+                projects.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))
+              )}
+            </select>
+            {project ? (
+              <span className="workbench-project-id" title={project}>
+                {project}
+              </span>
+            ) : null}
+          </div>
         </div>
         <EnvContextBar
           envName={envName}
@@ -1094,7 +1147,7 @@ export default function ApiWorkbench({
                       })
                     }
                   >
-                    发送到压测
+                    {applyToLoadTest ? "应用到压测" : "发送到压测"}
                   </button>
                 ) : null}
                 {activeRequestId ? (
@@ -1366,6 +1419,7 @@ export default function ApiWorkbench({
         open={envDialogOpen}
         project={project}
         envName={envName}
+        sampler={draft}
         variableNames={collectTemplateVarNames(draft)}
         onCancel={() => {
           sendAfterEnvSaveRef.current = false;

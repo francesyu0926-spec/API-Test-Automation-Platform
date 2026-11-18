@@ -18,7 +18,16 @@ export type LoadTestPlan = {
   sourceCollectionId?: string | null;
 };
 
-export type LoadTestTreeNode = "plan" | "threadGroup" | "httpSampler" | "aggregateReport";
+export type LoadTestConfigNode = "plan" | "threadGroup" | "httpSampler";
+
+/** 顶栏主视图：左侧树仅用于 config */
+export type LoadTestMainTab = "config" | "report" | "history" | "jmeterRun" | "jmeterJtl";
+
+export type LoadTestTreeNode =
+  | LoadTestConfigNode
+  | "aggregateReport"
+  | "jmeterRun"
+  | "jmeterJtl";
 
 export function defaultLoadTestPlan(): LoadTestPlan {
   return {

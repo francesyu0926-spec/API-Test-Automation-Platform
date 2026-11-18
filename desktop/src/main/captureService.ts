@@ -23,6 +23,7 @@ import {
   restoreWindowsSystemProxy,
   setWindowsSystemProxy,
   importWinHttpProxyFromIe,
+  winHttpIndicatesCaptureProxy,
   winHttpPointsToMitm,
 } from "./windowsProxy";
 
@@ -433,7 +434,7 @@ export async function restoreNetworkOnly(): Promise<{ message: string }> {
   await stopPacHttpServer();
   const winHttp = await getWinHttpProxyStatus();
   let extra = "";
-  if (winHttpPointsToMitm(winHttp, 8888)) {
+  if (winHttpIndicatesCaptureProxy(winHttp, 8888) || winHttpPointsToMitm(winHttp, 8888)) {
     await resetWinHttpProxyAlways();
     extra = "；已重置 WinHTTP（桌面终端）";
   }
@@ -702,7 +703,9 @@ export async function quickCaptureStart(options: {
   const mitmRows = await countMitmIngestedTransactions(options.project, sessionId);
   if (baidu.ok) {
     if (mitmRows > 0) {
-      messages.push(`真实链路正常：MITM→Ingest 已写入 ${mitmRows} 条。请保持抓取状态用 Chrome 访问业务站。`);
+      messages.push(
+        `真实链路正常：MITM→Ingest 已写入 ${mitmRows} 条（不含启动自检 baidu.com）。请保持抓取状态用 Chrome 访问业务站。`,
+      );
     } else {
       messages.push(
         `代理可达（${baidu.detail}）但 Ingest 无 MITM 记录。若刚修复过 addon，请停止后重新开始抓包。`,

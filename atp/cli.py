@@ -15,7 +15,7 @@ from atp.store import load_json
 def cmd_run(args: argparse.Namespace) -> int:
     config = load_platform_config()
     project = args.project or config.get("default_project", "example-service")
-    run_dir = run_suite(project, args.suite, args.env, config)
+    run_dir = run_suite(project, args.suite, args.env, config, args.cases)
     summary = load_json(run_dir / "summary.json", {})
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 0 if summary.get("status") == "passed" else 1

@@ -13,12 +13,24 @@ export type ProxyState = {
   autoConfigUrl: string;
 };
 
-const ATP_PAC_MARKERS = ["atp-proxy.pac", "/proxy.pac", "8766"];
+const ATP_PAC_MARKERS = ["atp-proxy.pac", "atp-proxy-embedded.pac", "/proxy.pac", "8766"];
+
+function isLocalPacUrl(pac: string): boolean {
+  const p = pac.trim().toLowerCase();
+  if (!p) return false;
+  return /https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?\//.test(p);
+}
 
 export function isLikelyAtpCaptureProxy(state: ProxyState, mitmPort = 8888): boolean {
-  const pac = state.autoConfigUrl.toLowerCase();
-  if (ATP_PAC_MARKERS.some((m) => pac.includes(m))) return true;
+  const pac = state.autoConfigUrl.toLowerCase().trim();
+  if (pac) {
+    if (ATP_PAC_MARKERS.some((m) => pac.includes(m))) return true;
+    if (isLocalPacUrl(pac)) return true;
+  }
   const srv = state.server.toLowerCase();
+  if (srv.includes("127.0.0.1") || srv.includes("localhost")) {
+    if (srv.includes(`:${mitmPort}`) || srv.includes(":8766")) return true;
+  }
   if (!state.enabled) return false;
   return srv.includes(`127.0.0.1:${mitmPort}`) || srv.includes(`:${mitmPort}`);
 }
@@ -96,6 +108,19 @@ export async function resetWinHttpProxyAlways(): Promise<boolean> {
 export function winHttpPointsToMitm(text: string, mitmPort = 8888): boolean {
   const t = text.toLowerCase();
   return t.includes(`127.0.0.1:${mitmPort}`) || new RegExp(`:\\s*127\\.0\\.0\\.1\\s*:\\s*${mitmPort}`).test(t);
+}
+
+/** WinHTTP 已 import 系统 PAC 或仍指向本机抓包时（南财等客户端常走 WinHTTP） */
+export function winHttpIndicatesCaptureProxy(text: string, mitmPort = 8888): boolean {
+  const t = text.toLowerCase();
+  if (!t.trim() || t.includes("direct access")) return false;
+  if (winHttpPointsToMitm(text, mitmPort)) return true;
+  if (/proxy\s+server\s*:\s*(127\.0\.0\.1|localhost)/.test(t)) return true;
+  if (/auto\s+proxy\s+url/.test(t)) {
+    if (ATP_PAC_MARKERS.some((m) => t.includes(m))) return true;
+    if (t.includes("127.0.0.1") || t.includes("localhost")) return true;
+  }
+  return false;
 }
 
 export async function getWinHttpProxyStatus(): Promise<string> {
@@ -213,7 +238,7 @@ export async function forceDisableSystemProxy(): Promise<{ ok: boolean; message:
   if (platform() !== "win32") return { ok: true, message: "" };
   const winHttpBefore = await showWinHttpProxy();
   await resetWinHttpProxy();
-  if (winHttpPointsToMitm(winHttpBefore)) {
+  if (winHttpIndicatesCaptureProxy(winHttpBefore)) {
     await resetWinHttpProxyAlways();
   }
   try {

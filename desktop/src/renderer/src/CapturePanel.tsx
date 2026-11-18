@@ -16,6 +16,7 @@ import { buildBatchCaseRows } from "./captureBatchCases";
 import { captureTxToCaseMeta, captureTxToCaseYaml } from "./caseYaml";
 import { transactionToCurl } from "./captureCurl";
 import { filterTransactions, isCaptureSelfTestRow } from "./captureFilters";
+import { embeddedBypassBlocksApiCapture, NANCAI_TERMINAL_PAC_HOSTS } from "./capturePacHints";
 import {
   asCaptureTransaction,
   captureBodyImageSrc,
@@ -127,8 +128,25 @@ export default function CapturePanel({
   }, [pacHosts]);
 
   const capturing = ingest.running || mitm.running;
+  const embeddedMisconfigured = useMemo(
+    () => proxyMode === "embedded" && embeddedBypassBlocksApiCapture(pacHosts).length > 0,
+    [proxyMode, pacHosts],
+  );
+  const embeddedBlockedHosts = useMemo(
+    () => (embeddedMisconfigured ? embeddedBypassBlocksApiCapture(pacHosts) : []),
+    [embeddedMisconfigured, pacHosts],
+  );
+  const applyNancaiPacTemplate = () => {
+    setProxyMode("pac");
+    setPacHosts(NANCAI_TERMINAL_PAC_HOSTS);
+  };
   const businessTxCount = useMemo(
     () => transactions.filter((t) => !isCaptureSelfTestRow(t)).length,
+    [transactions],
+  );
+  const probeTxCount = transactions.length - businessTxCount;
+  const withoutProbeTransactions = useMemo(
+    () => transactions.filter((t) => !isCaptureSelfTestRow(t)),
     [transactions],
   );
   const lockedCaptureSessionId =
@@ -139,7 +157,7 @@ export default function CapturePanel({
   const visibleTransactions = useMemo(() => {
     const q = trafficSearch.trim().toLowerCase();
     const source = q
-      ? transactions.filter(
+      ? withoutProbeTransactions.filter(
           (t) =>
             t.url.toLowerCase().includes(q) ||
             t.path.toLowerCase().includes(q) ||
@@ -148,12 +166,13 @@ export default function CapturePanel({
       : apiOnlyFilter
         ? (() => {
             const apiRows = filterTransactions(transactions, true);
-            if (!apiRows.length && transactions.length) return transactions;
-            return apiRows;
+            if (apiRows.length) return apiRows;
+            if (withoutProbeTransactions.length) return withoutProbeTransactions;
+            return [];
           })()
-        : transactions;
+        : withoutProbeTransactions;
     return [...source].sort(compareCapturedAtDesc);
-  }, [transactions, apiOnlyFilter, trafficSearch]);
+  }, [transactions, apiOnlyFilter, trafficSearch, withoutProbeTransactions]);
 
   const apiMatchCount = useMemo(
     () => filterTransactions(transactions, true).length,
@@ -162,7 +181,7 @@ export default function CapturePanel({
   const showingAllDespiteApiFilter =
     apiOnlyFilter &&
     !trafficSearch.trim() &&
-    transactions.length > 0 &&
+    withoutProbeTransactions.length > 0 &&
     apiMatchCount === 0;
 
   useEffect(() => {
@@ -277,11 +296,19 @@ export default function CapturePanel({
     if (q) {
       return {
         title: "无匹配流量",
-        hint: `没有包含「${q}」的记录。可清空搜索，或关闭「仅 API」查看全部 ${transactions.length} 条。`,
+        hint: `没有包含「${q}」的记录。可清空搜索，或关闭「仅 API」查看业务流量（${businessTxCount} 条）。`,
         action: "clearSearch" as const,
       };
     }
     if (capturing) {
+      if (probeTxCount > 0 && businessTxCount === 0) {
+        return {
+          title: "等待业务流量",
+          hint:
+            "开始抓包时有一条 www.baidu.com 链路自检（验证 MITM→Ingest），不会出现在列表中。请用 Chrome 或已重启的南财访问目标站点；列表约每 2 秒刷新。",
+          action: null,
+        };
+      }
       return {
         title: "等待流量",
         hint: "用 Chrome 访问目标站点（HTTPS 需已安装证书并重开浏览器）。列表约每 2 秒刷新。",
@@ -304,6 +331,8 @@ export default function CapturePanel({
     visibleTransactions.length,
     trafficSearch,
     transactions.length,
+    businessTxCount,
+    probeTxCount,
     apiOnlyFilter,
     apiMatchCount,
     capturing,
@@ -392,16 +421,8 @@ export default function CapturePanel({
     await refreshIndex();
   };
 
-  const onStart = async () => {
+  const runQuickCaptureStart = async () => {
     if (!project) return;
-    if (proxyMode === "pac" && !pacHosts.trim()) {
-      setMessage("PAC 模式下请填写要快照的 API 域名（逗号分隔）");
-      return;
-    }
-    if (!mitmAvail) {
-      setMessage("未安装 mitmproxy，请在仓库根目录 pip install -r requirements-capture.txt");
-      return;
-    }
     setBusy(true);
     setMessage("");
     const res = await window.atp.quickCaptureStart({
@@ -423,6 +444,29 @@ export default function CapturePanel({
     setMessage(res.messages.join(" · "));
     await refreshStatus();
     await refreshIndex();
+  };
+
+  const onStart = async () => {
+    if (!project) return;
+    if (proxyMode === "pac" && !pacHosts.trim()) {
+      setMessage("PAC 模式下请填写要快照的 API 域名（逗号分隔）");
+      return;
+    }
+    if (!mitmAvail) {
+      setMessage("未安装 mitmproxy，请在仓库根目录 pip install -r requirements-capture.txt");
+      return;
+    }
+    if (embeddedMisconfigured) {
+      const blocked = embeddedBlockedHosts.join(", ");
+      setPendingConfirm({
+        title: "直连列表会挡住南财 API",
+        message: `内嵌网页模式下，「直连域名」不经 mitm。当前含 ${blocked}，南财终端请求会直连，列表通常为空。建议点取消后改用「PAC（按域名）」并填入 API 主机；若仅抓 WebView 外链可仍继续。`,
+        confirmLabel: "仍要开始",
+        run: () => void runQuickCaptureStart(),
+      });
+      return;
+    }
+    await runQuickCaptureStart();
   };
 
   const onStop = async () => {
@@ -668,7 +712,14 @@ export default function CapturePanel({
 
         {!capturing && (
           <p className="hint">
-            首次：安装证书 → 选 <strong>PAC</strong> 并填写 API 域名（逗号分隔）→ 开始抓包。桌面客户端慎用「全局代理」，否则可能出现<strong>白屏/Connecting</strong>。
+            南财等<strong>桌面终端</strong>：请用 <strong>PAC（按域名）</strong>，把 API 主机填在下栏（不要放在内嵌模式的「直连」）。安装证书 → 开始抓包 →
+            <strong>完全退出</strong>终端再打开。慎用「全局代理」（易白屏）。
+          </p>
+        )}
+        {embeddedMisconfigured && !capturing && (
+          <p className="hint warn">
+            当前为内嵌网页，且直连列表含 <code>{embeddedBlockedHosts.join(", ")}</code>，这些域名的 HTTPS <strong>不会进 mitm</strong>
+            ，南财 API 无法出现在列表。请点「改用南财 PAC 抓包」或清空直连后只用 PAC 模式填写 API 域名。
           </p>
         )}
         {(proxyMode === "pac" || proxyMode === "embedded") && !capturing && (
@@ -699,8 +750,25 @@ export default function CapturePanel({
                 >
                   清空直连
                 </button>
-              ) : null}
+              ) : (
+                <button
+                  type="button"
+                  className="nav-btn nav-btn--compact"
+                  disabled={capturing}
+                  title="填入南财常见 API 主机并切换到 PAC 模式"
+                  onClick={applyNancaiPacTemplate}
+                >
+                  南财 PAC 模板
+                </button>
+              )}
             </div>
+          </div>
+        )}
+        {embeddedMisconfigured && !capturing && (
+          <div className="capture-pac-fix-row">
+            <button type="button" className="primary" onClick={applyNancaiPacTemplate}>
+              改用南财 PAC 抓包
+            </button>
           </div>
         )}
         {proxyMode === "embedded" && !capturing && (
@@ -715,9 +783,14 @@ export default function CapturePanel({
             API」或按域名搜索。SSL Pinning 无法 mitm。
           </p>
         )}
-        {capturing && businessTxCount === 0 && (
+        {capturing && embeddedMisconfigured && (
           <p className="hint warn">
-            尚无业务流量（仅自检或无请求经过 mitm）。请确认 PAC 含实际 API 主机、证书已装，并已重启目标应用后再次操作。
+            当前内嵌模式将 {embeddedBlockedHosts.join(", ")} 设为<strong>直连</strong>，南财 API 不会进列表。请「停止」后点「改用南财 PAC 抓包」重新开始。
+          </p>
+        )}
+        {capturing && businessTxCount === 0 && !embeddedMisconfigured && (
+          <p className="hint warn">
+            尚无业务流量（仅自检或无请求经过 mitm）。请确认 PAC 含实际 API 主机、证书已装，并已重启目标应用后再次操作；可先关闭「仅 API」或用域名搜索。
           </p>
         )}
         {capturing && (
@@ -756,12 +829,12 @@ export default function CapturePanel({
             {activeSessionId && (
               <span className="hint" style={{ fontWeight: 400, marginLeft: 8 }}>
                 {trafficSearch.trim()
-                  ? `筛选 ${visibleTransactions.length} / 全部 ${transactions.length}`
-                  : apiOnlyFilter && apiMatchCount !== transactions.length && !showingAllDespiteApiFilter
-                    ? `API ${apiMatchCount} / 全部 ${transactions.length}`
+                  ? `筛选 ${visibleTransactions.length} / 业务 ${businessTxCount}`
+                  : apiOnlyFilter && apiMatchCount !== businessTxCount && !showingAllDespiteApiFilter
+                    ? `API ${apiMatchCount} / 业务 ${businessTxCount}`
                     : showingAllDespiteApiFilter
-                      ? `全部 ${transactions.length} 条（未识别为 API，已全部显示）`
-                      : `${transactions.length} 条`}
+                      ? `业务 ${businessTxCount} 条（未识别为 API，已全部显示）`
+                      : `${businessTxCount} 条${probeTxCount ? `（${probeTxCount} 条自检已隐藏）` : ""}`}
               </span>
             )}
           </h3>

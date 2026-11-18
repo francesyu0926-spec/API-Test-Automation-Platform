@@ -1,4 +1,5 @@
-import { app, BrowserWindow, clipboard, ipcMain, session, shell } from "electron";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, session, shell } from "electron";
+import fs from "node:fs/promises";
 import path from "node:path";
 
 // 勿让本机系统代理(8888)劫持 Electron，否则会卡顿/无法拖动窗口
@@ -18,7 +19,8 @@ import { sendHttpRequest } from "./httpRequest";
 import * as wsSession from "./wsSession";
 import type { WsConnectPayload, WsSendPayload } from "../shared/apiWorkbenchTypes";
 import * as perfReports from "./perfReportStore";
-import { setRepoRoot } from "./repo";
+import * as jmeterRunner from "./jmeterRunner";
+import { getRepoRoot, setRepoRoot } from "./repo";
 import type {
   ApiCollectionFile,
   HttpBenchmarkOptions,
@@ -33,6 +35,8 @@ function createWindow(): void {
     minWidth: 900,
     minHeight: 600,
     title: "API Test Automation",
+    show: false,
+    backgroundColor: "#1a1f2c",
     movable: true,
     thickFrame: true,
     webPreferences: {
@@ -41,6 +45,11 @@ function createWindow(): void {
       nodeIntegration: false,
       sandbox: false,
     },
+  });
+
+  win.once("ready-to-show", () => {
+    win.show();
+    win.focus();
   });
 
   win.webContents.on("did-fail-load", (_e, code, desc, url) => {
@@ -67,10 +76,12 @@ function createWindow(): void {
   });
 }
 
-app.whenReady().then(async () => {
-  await session.defaultSession.setProxy({ mode: "direct" });
-  await capture.recoverStaleCaptureProxy(8888);
+app.whenReady().then(() => {
   createWindow();
+  void (async () => {
+    await session.defaultSession.setProxy({ mode: "direct" });
+    await capture.recoverStaleCaptureProxy(8888);
+  })();
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
@@ -93,6 +104,12 @@ ipcMain.handle("atp:setRepoRoot", (_e, root: string) => {
 ipcMain.handle("atp:listProjects", () => atp.listProjects());
 ipcMain.handle("atp:listProjectAssets", (_e, projectId: string) =>
   atp.listProjectAssets(projectId),
+);
+ipcMain.handle("atp:getSuiteCases", (_e, projectId: string, suiteName: string) =>
+  atp.getSuiteCases(projectId, suiteName),
+);
+ipcMain.handle("atp:listSuiteRunTargets", (_e, projectId: string, suiteName: string) =>
+  atp.listSuiteRunTargets(projectId, suiteName),
 );
 ipcMain.handle("atp:getProjectVariables", (_e, projectId: string, envName: string) =>
   atp.getProjectVariables(projectId, envName),
@@ -127,6 +144,8 @@ ipcMain.handle("atp:listRuns", (_e, filter?: { project?: string; status?: string
   atp.listRuns(filter),
 );
 ipcMain.handle("atp:getRunDetail", (_e, runId: string) => atp.getRunDetail(runId));
+ipcMain.handle("atp:deleteRuns", (_e, runIds: string[]) => atp.deleteRuns(runIds));
+ipcMain.handle("atp:clearAllRuns", () => atp.clearAllRuns());
 ipcMain.handle(
   "atp:runSuite",
   (_e, opts: { project: string; suite: string; env: string }) => atp.runSuite(opts),
@@ -242,11 +261,28 @@ ipcMain.handle("atp:cancelHttpBenchmark", () => {
   cancelHttpBenchmark();
   return { ok: true };
 });
-ipcMain.handle("atp:savePerfReport", (_e, projectId: string, report: HttpBenchmarkReport) =>
-  perfReports.savePerfReport(projectId, report),
-);
+ipcMain.handle("atp:savePerfReport", (e, projectId: string, report: HttpBenchmarkReport, visualHtml?: string) => {
+  const win = BrowserWindow.fromWebContents(e.sender) ?? BrowserWindow.getFocusedWindow() ?? null;
+  return perfReports.savePerfReport(projectId, report, visualHtml, win);
+});
 ipcMain.handle("atp:listPerfReports", (_e, projectId: string, limit?: number) =>
   perfReports.listPerfReports(projectId, limit),
+);
+ipcMain.handle("atp:loadPerfReports", (_e, projectId: string, files: string[]) =>
+  perfReports.loadPerfReports(projectId, files),
+);
+ipcMain.handle(
+  "atp:exportPerfReportPdfDialog",
+  (e, projectId: string, visualHtml: string, suggestedFileName: string) => {
+    const win = BrowserWindow.fromWebContents(e.sender) ?? BrowserWindow.getFocusedWindow() ?? null;
+    return perfReports.exportPerfReportPdfDialog(projectId, visualHtml, suggestedFileName, win);
+  },
+);
+ipcMain.handle("atp:getPerfReportsDir", (_e, projectId: string) =>
+  perfReports.getPerfReportsDirInfo(projectId),
+);
+ipcMain.handle("atp:deletePerfReports", (_e, projectId: string, files: string[]) =>
+  perfReports.deletePerfReports(projectId, files),
 );
 ipcMain.handle(
   "atp:saveProjectCase",
@@ -266,4 +302,101 @@ ipcMain.handle("atp:projectCaseExists", (_e, projectId: string, caseName: string
 );
 ipcMain.handle("atp:deleteProjectCase", (_e, projectId: string, caseName: string) =>
   caseStore.deleteProjectCase(projectId, caseName),
+);
+
+ipcMain.handle(
+  "atp:writeRepoFile",
+  async (_e, relativePath: string, content: string) => {
+    try {
+      const root = getRepoRoot();
+      const full = path.join(root, relativePath.replace(/^[/\\]+/, ""));
+      if (!full.startsWith(path.resolve(root))) {
+        return { ok: false, error: "路径越界" };
+      }
+      await fs.mkdir(path.dirname(full), { recursive: true });
+      await fs.writeFile(full, content.endsWith("\n") ? content : `${content}\n`, "utf8");
+      return { ok: true, relativePath: path.relative(root, full).replace(/\\/g, "/") };
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  },
+);
+
+ipcMain.handle(
+  "atp:readAbsoluteFile",
+  async (_e, filePath: string): Promise<string | null> => {
+    try {
+      const text = await fs.readFile(filePath, "utf8");
+      return text;
+    } catch {
+      return null;
+    }
+  },
+);
+
+ipcMain.handle("atp:detectJmeter", (_e, jmeterHome?: string) => jmeterRunner.detectJmeter(jmeterHome));
+ipcMain.handle("atp:runJmeter", (e, opts: jmeterRunner.RunJmeterOptions) =>
+  jmeterRunner.runJmeterTest(opts, (text) => {
+    if (!e.sender.isDestroyed()) e.sender.send("atp:jmeterLog", { text });
+  }),
+);
+ipcMain.handle("atp:cancelJmeter", () => jmeterRunner.cancelJmeterRun());
+ipcMain.handle("atp:openPath", (_e, targetPath: string) => shell.openPath(targetPath));
+
+ipcMain.handle(
+  "atp:pickOpenFile",
+  async (
+    _e,
+    opts: {
+      defaultPath?: string;
+      filters?: Array<{ name: string; extensions: string[] }>;
+    },
+  ): Promise<{ cancelled?: boolean; filePath?: string }> => {
+    const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0];
+    if (!win) return { cancelled: true };
+    const { canceled, filePaths } = await dialog.showOpenDialog(win, {
+      defaultPath: opts.defaultPath,
+      properties: ["openFile"],
+      filters: opts.filters ?? [{ name: "All", extensions: ["*"] }],
+    });
+    if (canceled || !filePaths[0]) return { cancelled: true };
+    return { filePath: filePaths[0] };
+  },
+);
+
+ipcMain.handle(
+  "atp:pickOpenDirectory",
+  async (_e, opts: { defaultPath?: string; title?: string }): Promise<{ cancelled?: boolean; dirPath?: string }> => {
+    const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0];
+    if (!win) return { cancelled: true };
+    const { canceled, filePaths } = await dialog.showOpenDialog(win, {
+      defaultPath: opts.defaultPath,
+      title: opts.title ?? "选择文件夹",
+      properties: ["openDirectory", "createDirectory"],
+    });
+    if (canceled || !filePaths[0]) return { cancelled: true };
+    return { dirPath: filePaths[0] };
+  },
+);
+
+ipcMain.handle(
+  "atp:saveTextWithDialog",
+  async (
+    _e,
+    opts: { defaultPath?: string; content: string; filters?: Array<{ name: string; extensions: string[] }> },
+  ) => {
+    const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0];
+    if (!win) return { ok: false, error: "无活动窗口" };
+    const { canceled, filePath } = await dialog.showSaveDialog(win, {
+      defaultPath: opts.defaultPath,
+      filters: opts.filters ?? [{ name: "Text", extensions: ["txt"] }],
+    });
+    if (canceled || !filePath) return { ok: false, cancelled: true };
+    try {
+      await fs.writeFile(filePath, opts.content.endsWith("\n") ? opts.content : `${opts.content}\n`, "utf8");
+      return { ok: true, filePath };
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  },
 );

@@ -1,21 +1,54 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import ConfirmDialog from "./ConfirmDialog";
+import ExportJmxDialog from "./ExportJmxDialog";
 import LoadingOverlay from "./LoadingOverlay";
 import { caseYamlToWorkbenchDraft } from "./caseYaml";
+import {
+  buildJmxFromCaseYamls,
+  buildJmxFromWorkbenchDrafts,
+  type JmxExportOptions,
+} from "./jmxExport";
+import { buildUrl, normalizeRawBodyDraft, savedRequestToDraft } from "./apiWorkbenchModel";
 import { newCaseYaml } from "./newCaseTemplate";
-import type { WorkbenchDraft } from "../../shared/apiWorkbenchTypes";
+import type { SavedApiRequest, WorkbenchDraft } from "../../shared/apiWorkbenchTypes";
+
+type CollectionRow = {
+  collectionId: string;
+  collectionName: string;
+  request: SavedApiRequest;
+};
+
+type ListMode = "yaml" | "collection";
+
+function collectionRowKey(row: CollectionRow): string {
+  return `${row.collectionId}:${row.request.id}`;
+}
+
+type JmxExportMode = "current" | "all" | "collection";
 
 type Props = {
   project: string;
+  projectDisplayName?: string;
   cases: string[];
   onRefresh: () => void;
   onCasePreviewChange?: (ctx: { caseName: string | null; yaml: string }) => void;
   onOpenInWorkbench?: (draft: WorkbenchDraft) => void;
 };
 
+function slugFileName(name: string): string {
+  return (
+    name
+      .trim()
+      .replace(/[^\w\u4e00-\u9fff-]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 64) || "test-plan"
+  );
+}
+
 export default function CasesPanel({
   project,
+  projectDisplayName,
   cases,
   onRefresh,
   onCasePreviewChange,
@@ -33,8 +66,41 @@ export default function CasesPanel({
   const [caseFilter, setCaseFilter] = useState("");
   const [listPage, setListPage] = useState(1);
   const [caseLoading, setCaseLoading] = useState(false);
+  const [jmxExportOpen, setJmxExportOpen] = useState(false);
+  const [jmxExportMode, setJmxExportMode] = useState<JmxExportMode>("current");
+  const [jmxExportItemCount, setJmxExportItemCount] = useState(0);
+  const [jmxExportBusy, setJmxExportBusy] = useState(false);
+  const [collectionRows, setCollectionRows] = useState<CollectionRow[]>([]);
+  const [listMode, setListMode] = useState<ListMode>("yaml");
+  const [selectedCollectionKey, setSelectedCollectionKey] = useState<string | null>(null);
 
-  const CASE_LIST_PAGE = 14;
+  const CASE_LIST_PAGE = 20;
+
+  const loadCollectionRows = useCallback(async () => {
+    if (!project) {
+      setCollectionRows([]);
+      return;
+    }
+    const cols = await window.atp.listCollections(project);
+    const rows: CollectionRow[] = [];
+    for (const c of cols) {
+      const doc = await window.atp.getCollection(project, c.id);
+      for (const r of doc?.requests ?? []) {
+        rows.push({ collectionId: c.id, collectionName: c.name, request: r });
+      }
+    }
+    setCollectionRows(rows);
+  }, [project]);
+
+  const selectedCaseSummary = useMemo(() => {
+    if (!yamlText.trim()) return null;
+    const draft = caseYamlToWorkbenchDraft(yamlText);
+    if (!draft) return null;
+    return {
+      method: draft.method,
+      url: buildUrl(draft.url, draft.query),
+    };
+  }, [yamlText]);
 
   const loadCase = useCallback(
     async (caseName: string) => {
@@ -57,7 +123,18 @@ export default function CasesPanel({
     setSelectedCase(null);
     setYamlText("");
     setEditing(false);
-  }, [project]);
+    setSelectedCollectionKey(null);
+    void loadCollectionRows();
+  }, [project, loadCollectionRows]);
+
+  useEffect(() => {
+    void loadCollectionRows();
+  }, [cases, loadCollectionRows]);
+
+  useEffect(() => {
+    if (cases.length) return;
+    if (collectionRows.length) setListMode("collection");
+  }, [project, cases.length, collectionRows.length]);
 
   useEffect(() => {
     if (selectedCase && cases.includes(selectedCase)) return;
@@ -74,11 +151,30 @@ export default function CasesPanel({
     return cases.filter((c) => c.toLowerCase().includes(q));
   }, [cases, caseFilter]);
 
-  const listPageCount = Math.max(1, Math.ceil(filteredCases.length / CASE_LIST_PAGE) || 1);
+  const filteredCollectionRows = useMemo(() => {
+    const q = caseFilter.trim().toLowerCase();
+    if (!q) return collectionRows;
+    return collectionRows.filter((row) => {
+      const hay = `${row.request.name} ${row.request.method} ${row.request.url} ${row.collectionName}`.toLowerCase();
+      return hay.includes(q);
+    });
+  }, [collectionRows, caseFilter]);
+
+  const selectedCollectionRow = useMemo(
+    () => collectionRows.find((r) => collectionRowKey(r) === selectedCollectionKey) ?? null,
+    [collectionRows, selectedCollectionKey],
+  );
+
+  const listItemCount = listMode === "yaml" ? filteredCases.length : filteredCollectionRows.length;
+  const listPageCount = Math.max(1, Math.ceil(listItemCount / CASE_LIST_PAGE) || 1);
   const pagedCases = useMemo(() => {
     const start = (listPage - 1) * CASE_LIST_PAGE;
     return filteredCases.slice(start, start + CASE_LIST_PAGE);
   }, [filteredCases, listPage]);
+  const pagedCollectionRows = useMemo(() => {
+    const start = (listPage - 1) * CASE_LIST_PAGE;
+    return filteredCollectionRows.slice(start, start + CASE_LIST_PAGE);
+  }, [filteredCollectionRows, listPage]);
 
   useEffect(() => {
     setListPage(1);
@@ -91,11 +187,138 @@ export default function CasesPanel({
   useEffect(() => {
     onCasePreviewChange?.({ caseName: selectedCase, yaml: yamlText });
   }, [selectedCase, yamlText, onCasePreviewChange]);
+
+  useEffect(() => {
+    if (listMode !== "collection" || !filteredCollectionRows.length) return;
+    if (selectedCollectionKey && filteredCollectionRows.some((r) => collectionRowKey(r) === selectedCollectionKey)) {
+      return;
+    }
+    setSelectedCollectionKey(collectionRowKey(filteredCollectionRows[0]));
+  }, [listMode, filteredCollectionRows, selectedCollectionKey]);
+
+  const openCollectionInWorkbench = (row: CollectionRow) => {
+    if (!onOpenInWorkbench) return;
+    const draft = normalizeRawBodyDraft(savedRequestToDraft(row.request));
+    onOpenInWorkbench(draft);
+  };
   // onCasePreviewChange 在 App 内做浅比较，避免重复 setState
 
   const showMsg = (text: string) => {
     setMessage(text);
-    window.setTimeout(() => setMessage(""), 2800);
+    window.setTimeout(() => setMessage(""), 4800);
+  };
+
+  const openJmxExportAll = () => {
+    void (async () => {
+      if (cases.length) {
+        setJmxExportMode("all");
+        setJmxExportItemCount(cases.length);
+        setJmxExportOpen(true);
+        return;
+      }
+      const col = await window.atp.getCollection(project, "default");
+      const reqs = col?.requests ?? [];
+      if (!reqs.length) {
+        showMsg(
+          "暂无可导出内容：请新建 YAML 用例，或在工作台「保存为用例」/「保存到集合」。南财行情请切换到项目「终端」或「南财行情」。",
+        );
+        return;
+      }
+      setJmxExportMode("collection");
+      setJmxExportItemCount(reqs.length);
+      setJmxExportOpen(true);
+    })();
+  };
+
+  const collectJmxCases = async (mode: JmxExportMode): Promise<Array<{ label: string; yaml: string }>> => {
+    if (mode === "current") {
+      if (!selectedCase || !yamlText.trim()) return [];
+      return [{ label: selectedCase, yaml: yamlText }];
+    }
+    const out: Array<{ label: string; yaml: string }> = [];
+    for (const c of cases) {
+      const text = await window.atp.readFile(`projects/${project}/cases/${c}.yaml`);
+      if (text?.trim()) out.push({ label: c, yaml: text });
+    }
+    return out;
+  };
+
+  const runJmxExport = async (opts: JmxExportOptions, target: "project" | "dialog") => {
+    setJmxExportBusy(true);
+    try {
+      let envVariables: Record<string, string> | undefined;
+      if (opts.injectEnv) {
+        const raw = await window.atp.getProjectVariables(project, opts.envName || "dev");
+        envVariables = {};
+        for (const [k, v] of Object.entries(raw)) {
+          if (k !== "project" && typeof v === "string") envVariables[k] = v;
+        }
+      }
+
+      let xml = "";
+      let errors: string[] = [];
+      let warnings: string[] = [];
+
+      if (jmxExportMode === "collection") {
+        const col = await window.atp.getCollection(project, "default");
+        const reqs = col?.requests ?? [];
+        if (!reqs.length) {
+          showMsg("API 集合为空");
+          return;
+        }
+        const items = reqs.map((r) => ({
+          label: r.name?.trim() || r.id,
+          draft: normalizeRawBodyDraft(savedRequestToDraft(r)),
+        }));
+        const built = buildJmxFromWorkbenchDrafts(items, opts, envVariables);
+        xml = built.xml;
+        errors = built.errors;
+        warnings = built.warnings;
+      } else {
+        const inputs = await collectJmxCases(jmxExportMode);
+        if (!inputs.length) {
+          showMsg(jmxExportMode === "current" ? "请先选择用例" : "项目中无用例");
+          return;
+        }
+        const built = buildJmxFromCaseYamls(inputs, opts, envVariables);
+        xml = built.xml;
+        errors = built.errors;
+        warnings = built.warnings;
+      }
+      if (!xml) {
+        showMsg(errors.join("；") || "生成失败");
+        return;
+      }
+      const baseName = slugFileName(opts.planName);
+      if (target === "project") {
+        const rel = `projects/${project}/jmx/${baseName}.jmx`;
+        const res = await window.atp.writeRepoFile(rel, xml);
+        if (!res.ok) {
+          showMsg(res.error ?? "写入失败");
+          return;
+        }
+        showMsg(
+          `已保存 ${res.relativePath ?? rel}${warnings.length ? `；${warnings[0]}` : ""}${errors.length ? `（跳过 ${errors.length} 条）` : ""}`,
+        );
+      } else {
+        const res = await window.atp.saveTextWithDialog({
+          defaultPath: `${baseName}.jmx`,
+          content: xml,
+          filters: [{ name: "JMeter 测试计划", extensions: ["jmx"] }],
+        });
+        if (res.cancelled) return;
+        if (!res.ok) {
+          showMsg(res.error ?? "保存失败");
+          return;
+        }
+        showMsg(
+          `已保存 ${res.filePath ?? ""}${warnings.length ? `；${warnings[0]}` : ""}${errors.length ? `（跳过 ${errors.length} 条）` : ""}`,
+        );
+      }
+      setJmxExportOpen(false);
+    } finally {
+      setJmxExportBusy(false);
+    }
   };
 
   const onSave = async () => {
@@ -132,148 +355,312 @@ export default function CasesPanel({
 
   if (!project) {
     return (
-      <Card title="用例列表">
+      <section className="card cases-panel-shell">
         <div className="panel-empty-state panel-empty-state--compact">
           <p className="panel-empty-title">未选择项目</p>
           <p className="panel-empty-hint">请在上方下拉框选择项目，或新建项目后再管理用例。</p>
         </div>
-      </Card>
+      </section>
     );
   }
 
   return (
     <>
-      <Card title={`用例列表${cases.length ? ` · ${cases.length}` : ""}`}>
-        <div className="case-list-toolbar">
-          <button type="button" className="primary" onClick={() => setNewCaseOpen(true)}>
-            新建用例
-          </button>
-          <input
-            type="search"
-            className="text-input case-list-search"
-            placeholder="搜索用例"
-            value={caseFilter}
-            onChange={(e) => setCaseFilter(e.target.value)}
-          />
-          <span className="case-list-count">
-            {filteredCases.length === cases.length
-              ? `${cases.length} 条`
-              : `${filteredCases.length} / ${cases.length}`}
-          </span>
-        </div>
-        <div className="case-list-scroll">
-          {pagedCases.map((c) => (
-            <button
-              key={c}
-              type="button"
-              className={`case-list-row${selectedCase === c ? " active" : ""}`}
-              onClick={() => void loadCase(c)}
-              title={c}
-            >
-              {c}
+      <section className="card cases-panel-shell">
+        <header className="cases-panel-head">
+          <div className="cases-panel-head-text">
+            <h3 className="cases-panel-heading">用例与集合</h3>
+          </div>
+          <div className="cases-panel-head-actions">
+            <button type="button" className="primary" onClick={() => setNewCaseOpen(true)}>
+              新建用例
             </button>
-          ))}
-          {!cases.length && (
-            <div className="case-list-empty">
-              <p className="case-list-empty-title">暂无用例</p>
-              <p className="case-list-empty-hint">点击「新建用例」，或从 API 工作台 / 抓包保存为用例。</p>
-            </div>
-          )}
-          {cases.length > 0 && !filteredCases.length && (
-            <div className="case-list-empty">无匹配</div>
-          )}
-        </div>
-        {filteredCases.length > CASE_LIST_PAGE && (
-          <div className="pagination case-list-pagination">
             <button
               type="button"
               className="nav-btn"
-              disabled={listPage <= 1}
-              onClick={() => setListPage((p) => Math.max(1, p - 1))}
+              title={
+                cases.length
+                  ? "将全部 YAML 用例合成一个 JMeter 测试计划"
+                  : "无用例时将从 API 工作台「默认模块」集合导出"
+              }
+              onClick={openJmxExportAll}
             >
-              上一页
-            </button>
-            <span className="pagination-info">
-              {listPage} / {listPageCount}
-            </span>
-            <button
-              type="button"
-              className="nav-btn"
-              disabled={listPage >= listPageCount}
-              onClick={() => setListPage((p) => Math.min(listPageCount, p + 1))}
-            >
-              下一页
+              生成 JMX（全部）
             </button>
           </div>
-        )}
-      </Card>
+        </header>
 
-      {(selectedCase || caseLoading) && (
-        <Card title={selectedCase ? `用例 · ${selectedCase}` : "用例"}>
-          <div className="loading-host" style={{ minHeight: caseLoading && !yamlText ? 160 : undefined }}>
-            <LoadingOverlay show={caseLoading} label="加载用例…" />
-          {yamlText !== "" && (
-            <>
-          <nav className="toolbar" style={{ marginBottom: 12 }}>
-            {!editing ? (
-              <>
-                <button type="button" className="nav-btn" onClick={() => setEditing(true)}>
-                  编辑
-                </button>
-                {onOpenInWorkbench && (
+        <div className="cases-panel-split">
+          <aside className="cases-panel-list" aria-label="用例列表">
+            <div className="cases-list-mode-tabs" role="tablist" aria-label="列表类型">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={listMode === "yaml"}
+                className={`cases-list-mode-tab${listMode === "yaml" ? " cases-list-mode-tab--active" : ""}`}
+                onClick={() => {
+                  setListMode("yaml");
+                  setListPage(1);
+                }}
+              >
+                <span className="cases-list-mode-tab-title">YAML</span>
+                <span className="cases-list-mode-tab-count">{cases.length}</span>
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={listMode === "collection"}
+                className={`cases-list-mode-tab${listMode === "collection" ? " cases-list-mode-tab--active" : ""}`}
+                onClick={() => {
+                  setListMode("collection");
+                  setListPage(1);
+                }}
+              >
+                <span className="cases-list-mode-tab-title">集合</span>
+                <span className="cases-list-mode-tab-count">{collectionRows.length}</span>
+              </button>
+            </div>
+            <input
+              type="search"
+              className="text-input cases-panel-search"
+              placeholder={listMode === "yaml" ? "搜索用例" : "搜索名称 / URL"}
+              value={caseFilter}
+              onChange={(e) => setCaseFilter(e.target.value)}
+            />
+            <div className="case-list-scroll cases-panel-list-scroll">
+              {listMode === "yaml" &&
+                pagedCases.map((c) => (
                   <button
+                    key={c}
                     type="button"
-                    className="primary"
-                    onClick={() => {
-                      const draft = caseYamlToWorkbenchDraft(yamlText);
-                      if (!draft) {
-                        showMsg("无法解析用例 YAML");
-                        return;
-                      }
-                      onOpenInWorkbench(draft);
-                    }}
+                    className={`case-list-row${selectedCase === c ? " active" : ""}`}
+                    onClick={() => void loadCase(c)}
+                    title={c}
                   >
-                    在工作台打开
+                    {c}
                   </button>
-                )}
-                <button type="button" className="primary danger" onClick={() => setPendingDelete(true)}>
-                  删除
-                </button>
-              </>
-            ) : (
-              <>
-                <button type="button" className="primary" disabled={saving} onClick={() => void onSave()}>
-                  {saving ? "保存中…" : "保存"}
-                </button>
+                ))}
+              {listMode === "yaml" && !cases.length && (
+                <div className="case-list-empty">
+                  <p className="case-list-empty-title">暂无用例</p>
+                  <p className="case-list-empty-hint">
+                    {collectionRows.length
+                      ? `工作台已有 ${collectionRows.length} 条集合请求，请切到「集合请求」查看；或在此处新建 / 抓包「保存为用例」。`
+                      : "新建、抓包或在工作台「保存为用例」。"}
+                  </p>
+                </div>
+              )}
+              {listMode === "yaml" && cases.length > 0 && !filteredCases.length && (
+                <div className="case-list-empty">无匹配</div>
+              )}
+              {listMode === "collection" &&
+                pagedCollectionRows.map((row) => {
+                  const key = collectionRowKey(row);
+                  const url = buildUrl(row.request.url, row.request.query);
+                  const label = row.request.name?.trim() || row.request.id;
+                  const showModule = row.collectionName && row.collectionName !== "默认模块";
+                  return (
+                    <button
+                      key={key}
+                      type="button"
+                      className={`case-list-row case-list-row--collection${
+                        selectedCollectionKey === key ? " active" : ""
+                      }`}
+                      onClick={() => setSelectedCollectionKey(key)}
+                      title={url}
+                    >
+                      <span className="case-list-row-collection-main">
+                        <span
+                          className={`cases-method-pill cases-method-pill--compact cases-method-pill--${row.request.method.toLowerCase()}`}
+                        >
+                          {row.request.method}
+                        </span>
+                        <span className="case-list-row-collection-name">{label}</span>
+                      </span>
+                      {showModule ? (
+                        <span className="case-list-row-collection-meta">{row.collectionName}</span>
+                      ) : null}
+                    </button>
+                  );
+                })}
+              {listMode === "collection" && !collectionRows.length && (
+                <div className="case-list-empty">
+                  <p className="case-list-empty-title">暂无集合请求</p>
+                  <p className="case-list-empty-hint">在 API 工作台调试后点「保存到集合」。</p>
+                </div>
+              )}
+              {listMode === "collection" && collectionRows.length > 0 && !filteredCollectionRows.length && (
+                <div className="case-list-empty">无匹配</div>
+              )}
+            </div>
+            {listItemCount > CASE_LIST_PAGE && (
+              <div className="pagination case-list-pagination cases-panel-list-pagination">
                 <button
                   type="button"
-                  className="nav-btn"
-                  disabled={saving}
-                  onClick={() => {
-                    setEditDraft(yamlText);
-                    setEditing(false);
-                  }}
+                  className="nav-btn nav-btn--compact"
+                  disabled={listPage <= 1}
+                  onClick={() => setListPage((p) => Math.max(1, p - 1))}
                 >
-                  取消
+                  上一页
                 </button>
+                <span className="pagination-info">
+                  {listPage}/{listPageCount}
+                </span>
+                <button
+                  type="button"
+                  className="nav-btn nav-btn--compact"
+                  disabled={listPage >= listPageCount}
+                  onClick={() => setListPage((p) => Math.min(listPageCount, p + 1))}
+                >
+                  下一页
+                </button>
+              </div>
+            )}
+          </aside>
+
+          <div className="cases-panel-detail loading-host">
+            <LoadingOverlay show={caseLoading} label="加载用例…" />
+            {listMode === "collection" && selectedCollectionRow && (
+              <>
+                <div className="cases-panel-detail-head cases-panel-detail-head--inline">
+                  <div className="cases-panel-detail-title-block">
+                    <h4 className="cases-panel-detail-name">{selectedCollectionRow.request.name || "未命名请求"}</h4>
+                    <p className="cases-panel-detail-request">
+                      <span
+                        className={`cases-method-pill cases-method-pill--${selectedCollectionRow.request.method.toLowerCase()}`}
+                      >
+                        {selectedCollectionRow.request.method}
+                      </span>
+                      <span className="cases-panel-detail-url">
+                        {buildUrl(selectedCollectionRow.request.url, selectedCollectionRow.request.query)}
+                      </span>
+                    </p>
+                  </div>
+                  {onOpenInWorkbench ? (
+                    <button
+                      type="button"
+                      className="primary nav-btn--compact cases-panel-detail-head-action"
+                      onClick={() => openCollectionInWorkbench(selectedCollectionRow)}
+                    >
+                      在工作台打开
+                    </button>
+                  ) : null}
+                </div>
+                <pre className="case-yaml-pre cases-panel-yaml-pre">
+                  {JSON.stringify(selectedCollectionRow.request, null, 2)}
+                </pre>
               </>
             )}
-          </nav>
-          {editing ? (
-            <textarea
-              className="case-yaml-editor"
-              value={editDraft}
-              spellCheck={false}
-              onChange={(e) => setEditDraft(e.target.value)}
-            />
-          ) : (
-            <pre className="case-yaml-pre">{yamlText}</pre>
-          )}
-            </>
-          )}
+            {listMode === "yaml" && !selectedCase && !caseLoading && (
+              <div className="cases-panel-detail-empty">
+                <p className="cases-panel-detail-empty-title">选择左侧用例</p>
+                <p className="hint">预览 YAML、编辑或在 API 工作台打开</p>
+              </div>
+            )}
+            {listMode === "collection" && !selectedCollectionRow && (
+              <div className="cases-panel-detail-empty">
+                <p className="cases-panel-detail-empty-title">选择左侧集合请求</p>
+                <p className="hint">来自工作台「保存到集合」，与 YAML 用例相互独立</p>
+              </div>
+            )}
+            {listMode === "yaml" && selectedCase && yamlText !== "" && (
+              <>
+                <div className="cases-panel-detail-head">
+                  <div className="cases-panel-detail-title-block">
+                    <h4 className="cases-panel-detail-name">{selectedCase}</h4>
+                    {selectedCaseSummary && (
+                      <p className="cases-panel-detail-request" title={selectedCaseSummary.url}>
+                        <span
+                          className={`cases-method-pill cases-method-pill--${selectedCaseSummary.method.toLowerCase()}`}
+                        >
+                          {selectedCaseSummary.method}
+                        </span>
+                        <span className="cases-panel-detail-url">{selectedCaseSummary.url}</span>
+                      </p>
+                    )}
+                  </div>
+                  <nav className="cases-panel-detail-toolbar" aria-label="用例操作">
+                    {!editing ? (
+                      <>
+                        <div className="cases-panel-detail-toolbar-start">
+                          {onOpenInWorkbench && (
+                            <button
+                              type="button"
+                              className="primary nav-btn--compact"
+                              onClick={() => {
+                                const draft = caseYamlToWorkbenchDraft(yamlText);
+                                if (!draft) {
+                                  showMsg("无法解析用例 YAML");
+                                  return;
+                                }
+                                onOpenInWorkbench(draft);
+                              }}
+                            >
+                              在工作台打开
+                            </button>
+                          )}
+                          <div className="cases-panel-detail-btn-group" role="group" aria-label="编辑与导出">
+                            <button type="button" className="nav-btn nav-btn--compact" onClick={() => setEditing(true)}>
+                              编辑 YAML
+                            </button>
+                            <button
+                              type="button"
+                              className="nav-btn nav-btn--compact"
+                              onClick={() => {
+                                setJmxExportMode("current");
+                                setJmxExportItemCount(1);
+                                setJmxExportOpen(true);
+                              }}
+                            >
+                              生成 JMX
+                            </button>
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          className="nav-btn nav-btn--compact cases-panel-detail-delete"
+                          onClick={() => setPendingDelete(true)}
+                        >
+                          删除用例
+                        </button>
+                      </>
+                    ) : (
+                      <div className="cases-panel-detail-toolbar-start">
+                        <button type="button" className="primary nav-btn--compact" disabled={saving} onClick={() => void onSave()}>
+                          {saving ? "保存中…" : "保存"}
+                        </button>
+                        <button
+                          type="button"
+                          className="nav-btn nav-btn--compact"
+                          disabled={saving}
+                          onClick={() => {
+                            setEditDraft(yamlText);
+                            setEditing(false);
+                          }}
+                        >
+                          取消编辑
+                        </button>
+                      </div>
+                    )}
+                  </nav>
+                </div>
+                <div className="cases-panel-yaml-host">
+                  {editing ? (
+                    <textarea
+                      className="case-yaml-editor cases-panel-yaml-editor"
+                      value={editDraft}
+                      spellCheck={false}
+                      onChange={(e) => setEditDraft(e.target.value)}
+                    />
+                  ) : (
+                    <pre className="case-yaml-pre cases-panel-yaml-pre">{yamlText}</pre>
+                  )}
+                </div>
+              </>
+            )}
           </div>
-        </Card>
-      )}
+        </div>
+      </section>
 
       {message && (
         <div className="app-toast" role="status">
@@ -331,6 +718,23 @@ export default function CasesPanel({
         </div>
       )}
 
+      <ExportJmxDialog
+        open={jmxExportOpen}
+        title={
+          jmxExportMode === "collection"
+            ? "生成 JMX（API 集合）"
+            : jmxExportMode === "all"
+              ? "生成 JMX（全部用例）"
+              : "生成 JMX（当前用例）"
+        }
+        caseCount={jmxExportItemCount}
+        collectionMode={jmxExportMode === "collection"}
+        defaultPlanName={projectDisplayName || project}
+        busy={jmxExportBusy}
+        onCancel={() => setJmxExportOpen(false)}
+        onConfirm={(opts, target) => void runJmxExport(opts, target)}
+      />
+
       <ConfirmDialog
         open={pendingDelete}
         title="删除用例"
@@ -341,14 +745,5 @@ export default function CasesPanel({
         onConfirm={() => void onDelete()}
       />
     </>
-  );
-}
-
-function Card({ title, children }: { title: string; children: ReactNode }) {
-  return (
-    <section className="card">
-      <h3 className="card-title">{title}</h3>
-      {children}
-    </section>
   );
 }

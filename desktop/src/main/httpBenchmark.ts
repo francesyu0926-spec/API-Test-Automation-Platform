@@ -25,11 +25,29 @@ function percentile(sorted: number[], p: number): number {
   return Math.round(sorted[lo] + (sorted[hi] - sorted[lo]) * (idx - lo));
 }
 
-function buildStats(samples: HttpBenchmarkSample[], wallMs: number): HttpBenchmarkStats {
+function estimateSentBytes(payload: HttpSendPayload): number {
+  let size = payload.url.length;
+  if (payload.body != null) {
+    size +=
+      typeof payload.body === "string" ? payload.body.length : JSON.stringify(payload.body).length;
+  }
+  for (const v of Object.values(payload.headers ?? {})) {
+    size += String(v).length + 16;
+  }
+  return Math.max(size, 64);
+}
+
+function buildStats(
+  samples: HttpBenchmarkSample[],
+  wallMs: number,
+  sentBytesPerSample = 0,
+): HttpBenchmarkStats {
   const measured = samples.filter((s) => !s.warmup);
   const success = measured.filter((s) => s.ok && !s.error).length;
   const failed = measured.length - success;
   const durations = measured.map((s) => s.durationMs).sort((a, b) => a - b);
+  const bytesReceived = measured.reduce((a, s) => a + s.bodySize, 0);
+  const bytesSent = measured.length * sentBytesPerSample;
   const statusCodes: Record<string, number> = {};
   for (const s of measured) {
     const key = s.status ? String(s.status) : s.error ? "error" : "0";

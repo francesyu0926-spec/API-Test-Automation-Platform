@@ -1,6 +1,38 @@
 import type { WorkbenchDraft } from "../../shared/apiWorkbenchTypes";
 import { findUnresolvedTemplateVars } from "../../shared/vars";
 
+function bearerTokenFromAuthorization(value: string): string | null {
+  const m = value.trim().match(/^Bearer\s+(\S+)/i);
+  return m?.[1] ?? null;
+}
+
+/** 本项目常见：JWT 写在 secret，Header token 使用 {{token}} */
+function looksLikeJwt(value: string): boolean {
+  const v = value.trim();
+  if (!v) return false;
+  if (v.includes("{{")) return false;
+  return /^eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/i.test(v);
+}
+
+export function coalesceAuthVariables(variables: Record<string, string>): Record<string, string> {
+  const out = { ...variables };
+  const token = out.token?.trim() ?? "";
+  const secret = out.secret?.trim() ?? "";
+  if (!token && secret && looksLikeJwt(secret)) {
+    out.token = secret;
+  } else if (!secret && token && looksLikeJwt(token)) {
+    out.secret = token;
+  }
+  if (!out.token?.trim() && out.authorization?.trim()) {
+    const bearer = bearerTokenFromAuthorization(out.authorization);
+    if (bearer) out.token = bearer;
+  }
+  if (!out.secret?.trim() && out.token?.trim() && looksLikeJwt(out.token)) {
+    out.secret = out.token;
+  }
+  return out;
+}
+
 /** Header 名 → 环境变量名（小写匹配 Header） */
 const AUTH_HEADER_TO_VAR: Record<string, string> = {
   token: "token",
@@ -19,6 +51,10 @@ export function authPatchFromSampler(sampler: WorkbenchDraft): Record<string, st
     const val = row.value?.trim() ?? "";
     if (!val || val.includes("{{")) continue;
     patch[varName] = val;
+  }
+  if (!patch.token && patch.authorization) {
+    const bearer = bearerTokenFromAuthorization(patch.authorization);
+    if (bearer) patch.token = bearer;
   }
   return patch;
 }
@@ -65,7 +101,11 @@ export function mergeAuthFromSampler(
     const cur = out[k]?.trim();
     if (!cur) out[k] = v;
   }
-  return out;
+  if (!out.token?.trim() && out.authorization?.trim()) {
+    const bearer = bearerTokenFromAuthorization(out.authorization);
+    if (bearer) out.token = bearer;
+  }
+  return coalesceAuthVariables(out);
 }
 
 type CaptureHeaders = { request?: { headers?: Record<string, string> } };

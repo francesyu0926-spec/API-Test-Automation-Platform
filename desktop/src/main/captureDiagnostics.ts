@@ -32,9 +32,9 @@ export async function runCaptureDiagnostics(mitmPort = 8888): Promise<{
     issues.push("MITM 未运行");
     fixes.push("抓包页点「开始抓包」，或点「仅恢复上网」关闭残留代理");
   }
-  if (!portListening && atpProxy && proxy.enabled) {
-    issues.push("系统代理仍指向抓包，但 8888 无监听（Chrome 会报 ERR_PROXY_CONNECTION_FAILED）");
-    fixes.push("抓包页点「仅恢复上网」或 Windows 设置 → 代理 → 关闭");
+  if (!portListening && atpProxy && (proxy.enabled || (proxy.autoConfigUrl ?? "").trim())) {
+    issues.push("系统代理/PAC 仍指向抓包，但 8888 无监听（浏览器或南财等客户端可能一直 Connecting）");
+    fixes.push("点侧栏「恢复上网」或抓包页「仅恢复上网」；完全退出南财后重开");
   } else if (!portListening && mitmRunning) {
     issues.push(`本机 ${mitmPort} 端口无监听（mitm 可能已闪退）`);
     fixes.push("查看终端 mitmdump 报错；重装 requirements-capture.txt");

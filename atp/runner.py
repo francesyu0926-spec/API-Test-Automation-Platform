@@ -85,7 +85,13 @@ def execute_case(case_path: Path, variables: dict[str, str], timeout: float, ver
     }
 
 
-def run_suite(project: str, suite_name: str, env_name: str, config: dict[str, Any]) -> Path:
+def run_suite(
+    project: str,
+    suite_name: str,
+    env_name: str,
+    config: dict[str, Any],
+    cases: list[str] | None = None,
+) -> Path:
     repo = repo_root()
     project_dir = repo / "projects" / project
     suite_path = project_dir / "suites" / f"{suite_name}.yaml"
