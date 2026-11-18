@@ -1,0 +1,474 @@
+import { forwardRef, useEffect, useImperativeHandle, useMemo, useState } from "react";
+
+import {
+  MAX_TABLE_ROWS,
+  buildVisualSections,
+  collectFlatColumns,
+  complexSummary,
+  formatJsonPrimitive,
+  getAtPath,
+  isArrayOfRecords,
+  isPrimitive,
+  isRecord,
+  rowRecords,
+  type VisualSection,
+} from "./jsonVisualModel";
+import {
+  clearSectionSelection,
+  countSelectedRows,
+  sectionExportKey,
+  setSelectionAll,
+  toggleSelectionRow,
+  type VisualRowSelection,
+} from "./jsonVisualSelection";
+
+function JsonKeyValueTable({
+  title,
+  entries,
+  sectionKey,
+  selection,
+  onToggleRow,
+  onToggleAll,
+}: {
+  title?: string;
+  entries: Array<[string, unknown]>;
+  sectionKey: string;
+  selection: VisualRowSelection;
+  onToggleRow: (index: number) => void;
+  onToggleAll: (all: boolean) => void;
+}) {
+  const [expandState, setExpandState] = useState<ExpandState>({});
+  const toggle = (id: string) => setExpandState((prev) => ({ ...prev, [id]: !prev[id] }));
+  const selected = new Set(selection[sectionKey] ?? []);
+  const allChecked = entries.length > 0 && selected.size === entries.length;
+
+  return (
+    <section className="json-vis-section">
+      {title ? <h4 className="json-vis-section-title">{title}</h4> : null}
+      <table className="json-vis-table json-vis-table--kv">
+        <thead>
+          <tr>
+            <th className="json-vis-table-sel">
+              <input
+                type="checkbox"
+                checked={allChecked}
+                title="全选本表（含未显示行）"
+                onChange={(e) => onToggleAll(e.target.checked)}
+              />
+            </th>
+            <th>字段</th>
+            <th>值</th>
+          </tr>
+        </thead>
+        <tbody>
+          {entries.map(([key, value], i) => (
+            <tr key={key} className={selected.has(i) ? "json-vis-row--selected" : ""}>
+              <td className="json-vis-table-sel">
+                <input
+                  type="checkbox"
+                  checked={selected.has(i)}
+                  onChange={() => onToggleRow(i)}
+                  aria-label={`选择字段 ${key}`}
+                />
+              </td>
+              <td className="json-vis-kv-key">{key}</td>
+              <td className="json-vis-kv-val">
+                <JsonCellValue
+                  value={value}
+                  rowKey={`kv-${key}`}
+                  expandState={expandState}
+                  onToggle={toggle}
+                />
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </section>
+  );
+}
+
+function JsonPrimitiveListTable({
+  title,
+  rows,
+  sectionKey,
+  selection,
+  onToggleRow,
+  onToggleAll,
+}: {
+  title: string;
+  rows: unknown[];
+  sectionKey?: string;
+  selection?: VisualRowSelection;
+  onToggleRow?: (index: number) => void;
+  onToggleAll?: (all: boolean) => void;
+}) {
+  const display = rows.slice(0, MAX_TABLE_ROWS);
+  const truncated = rows.length > MAX_TABLE_ROWS;
+  const selectable = Boolean(sectionKey && onToggleRow && onToggleAll);
+  const selected = new Set(sectionKey ? (selection?.[sectionKey] ?? []) : []);
+  const allChecked = selectable && rows.length > 0 && selected.size === rows.length;
+
+  return (
+    <section className="json-vis-section">
+      <h4 className="json-vis-section-title">{title}</h4>
+      {truncated ? (
+        <p className="hint json-vis-table-hint">
+          界面显示前 {MAX_TABLE_ROWS} 行，共 {rows.length} 行 · XLSX 可<strong>全部/所选</strong>；PNG 仅<strong>所选≤20</strong>
+        </p>
+      ) : null}
+      <table className="json-vis-table">
+        <thead>
+          <tr>
+            {selectable ? (
+              <th className="json-vis-table-sel">
+                <input
+                  type="checkbox"
+                  checked={allChecked}
+                  title={`全选本表全部 ${rows.length} 行`}
+                  onChange={(e) => onToggleAll!(e.target.checked)}
+                />
+              </th>
+            ) : null}
+            <th className="json-vis-table-idx">#</th>
+            <th>值</th>
+          </tr>
+        </thead>
+        <tbody>
+          {display.map((v, i) => (
+            <tr key={i} className={selected.has(i) ? "json-vis-row--selected" : ""}>
+              {selectable ? (
+                <td className="json-vis-table-sel">
+                  <input type="checkbox" checked={selected.has(i)} onChange={() => onToggleRow!(i)} />
+                </td>
+              ) : null}
+              <td className="json-vis-table-idx">{i + 1}</td>
+              <td>
+                <JsonCellValue value={v} rowKey={`${title}-${i}`} />
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </section>
+  );
+}
+
+type ExpandState = Record<string, boolean>;
+
+function JsonCellValue({
+  value,
+  rowKey,
+  expandState,
+  onToggle,
+}: {
+  value: unknown;
+  rowKey: string;
+  expandState?: ExpandState;
+  onToggle?: (id: string) => void;
+}) {
+  const complex = value !== null && typeof value === "object";
+  if (!complex) {
+    const type =
+      value === null ? "null" : typeof value === "string" ? "string" : typeof value === "number" ? "number" : "boolean";
+    const display = value === null ? "null" : typeof value === "string" ? value : formatJsonPrimitive(value);
+    return (
+      <span className={`json-vis-val json-vis-val--${type}`} title={display}>
+        {typeof value === "string" && display.length > 120 ? `${display.slice(0, 120)}…` : display}
+      </span>
+    );
+  }
+
+  const cellId = `cell-${rowKey}`;
+  const expanded = expandState?.[cellId] ?? false;
+  const canExpand = onToggle != null;
+
+  return (
+    <div className="json-vis-cell-complex">
+      {canExpand ? (
+        <button
+          type="button"
+          className="json-vis-expand-btn"
+          aria-expanded={expanded}
+          onClick={() => onToggle(cellId)}
+        >
+          <span className="json-vis-chevron">{expanded ? "▾" : "▸"}</span>
+          {complexSummary(value)}
+        </button>
+      ) : (
+        <code className="json-vis-table-nested">{complexSummary(value)}</code>
+      )}
+      {expanded && canExpand ? (
+        <div className="json-vis-cell-nested">
+          <JsonNestedValue value={value} />
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function JsonNestedValue({ value }: { value: unknown }) {
+  if (Array.isArray(value)) {
+    if (isArrayOfRecords(value)) return <JsonRecordTable title="" rows={value} nested />;
+    return <JsonPrimitiveListTable title="数组" rows={value} />;
+  }
+  if (isRecord(value)) {
+    const sections = buildVisualSections(value);
+    return <JsonSectionStack sections={sections} nested selection={{}} onSelectionChange={() => {}} />;
+  }
+  return <span className="json-vis-val">{formatJsonPrimitive(value)}</span>;
+}
+
+function JsonRecordTable({
+  title,
+  rows,
+  nested = false,
+  sectionKey,
+  selection,
+  onToggleRow,
+  onToggleAll,
+}: {
+  title: string;
+  rows: Record<string, unknown>[];
+  nested?: boolean;
+  sectionKey?: string;
+  selection?: VisualRowSelection;
+  onToggleRow?: (index: number) => void;
+  onToggleAll?: (all: boolean) => void;
+}) {
+  const [expandState, setExpandState] = useState<ExpandState>({});
+  const columns = useMemo(() => collectFlatColumns(rows), [rows]);
+  const displayRows = rows.slice(0, MAX_TABLE_ROWS);
+  const truncated = rows.length > MAX_TABLE_ROWS;
+  const selectable = Boolean(sectionKey && onToggleRow && onToggleAll);
+  const selected = new Set(sectionKey ? (selection?.[sectionKey] ?? []) : []);
+  const allChecked = selectable && rows.length > 0 && selected.size === rows.length;
+
+  const toggle = (id: string) => {
+    setExpandState((prev) => ({ ...prev, [id]: !prev[id] }));
+  };
+
+  return (
+    <section className={`json-vis-section${nested ? " json-vis-section--nested" : ""}`}>
+      {title ? <h4 className="json-vis-section-title">{title}</h4> : null}
+      {truncated ? (
+        <p className="hint json-vis-table-hint">
+          界面显示前 {MAX_TABLE_ROWS} 行，共 {rows.length} 行 · XLSX 可<strong>全部/所选</strong>；PNG 仅<strong>所选≤20</strong>
+        </p>
+      ) : null}
+      <table className="json-vis-table json-vis-table--data">
+        <thead>
+          <tr>
+            {selectable ? (
+              <th className="json-vis-table-sel">
+                <input
+                  type="checkbox"
+                  checked={allChecked}
+                  title={`全选本表全部 ${rows.length} 行`}
+                  onChange={(e) => onToggleAll!(e.target.checked)}
+                />
+              </th>
+            ) : null}
+            <th className="json-vis-table-idx">#</th>
+            {columns.map((col) => (
+              <th key={col.path} title={col.header}>
+                {col.header}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {displayRows.map((row, i) => (
+            <tr key={i} className={selected.has(i) ? "json-vis-row--selected" : ""}>
+              {selectable ? (
+                <td className="json-vis-table-sel">
+                  <input type="checkbox" checked={selected.has(i)} onChange={() => onToggleRow!(i)} />
+                </td>
+              ) : null}
+              <td className="json-vis-table-idx">{i + 1}</td>
+              {columns.map((col) => {
+                const cell = getAtPath(row, col.path);
+                return (
+                  <td key={col.path}>
+                    <JsonCellValue
+                      value={cell}
+                      rowKey={`${title}-${i}-${col.path}`}
+                      expandState={expandState}
+                      onToggle={toggle}
+                    />
+                  </td>
+                );
+              })}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </section>
+  );
+}
+
+function JsonArraySection({
+  title,
+  rows,
+  sectionKey,
+  selection,
+  onToggleRow,
+  onToggleAll,
+}: {
+  title: string;
+  rows: unknown[];
+  sectionKey: string;
+  selection: VisualRowSelection;
+  onToggleRow: (index: number) => void;
+  onToggleAll: (all: boolean) => void;
+}) {
+  const safeRows = Array.isArray(rows) ? rows : [];
+  if (!safeRows.length) {
+    return (
+      <section className="json-vis-section">
+        <h4 className="json-vis-section-title">{title}</h4>
+        <p className="hint json-vis-table-hint">（空数组）</p>
+      </section>
+    );
+  }
+
+  if (isArrayOfRecords(safeRows)) {
+    return (
+      <JsonRecordTable
+        title={title}
+        rows={safeRows}
+        sectionKey={sectionKey}
+        selection={selection}
+        onToggleRow={onToggleRow}
+        onToggleAll={(all) => onToggleAll(all)}
+      />
+    );
+  }
+
+  const records = rowRecords(safeRows);
+  if (records.length >= Math.ceil(safeRows.length * 0.5)) {
+    return (
+      <JsonRecordTable
+        title={title}
+        rows={records}
+        sectionKey={sectionKey}
+        selection={selection}
+        onToggleRow={onToggleRow}
+        onToggleAll={onToggleAll}
+      />
+    );
+  }
+
+  return (
+    <JsonPrimitiveListTable
+      title={title}
+      rows={safeRows}
+      sectionKey={sectionKey}
+      selection={selection}
+      onToggleRow={onToggleRow}
+      onToggleAll={onToggleAll}
+    />
+  );
+}
+
+function JsonSectionStack({
+  sections,
+  nested = false,
+  selection,
+  onSelectionChange,
+}: {
+  sections: VisualSection[];
+  nested?: boolean;
+  selection: VisualRowSelection;
+  onSelectionChange: (next: VisualRowSelection) => void;
+}) {
+  const bindSection = (key: string, count: number) => ({
+    onToggleRow: (index: number) => onSelectionChange(toggleSelectionRow(selection, key, index)),
+    onToggleAll: (all: boolean) =>
+      onSelectionChange(all ? setSelectionAll(selection, key, count) : clearSectionSelection(selection, key)),
+  });
+
+  return (
+    <div className={`json-vis-stack${nested ? " json-vis-stack--nested" : ""}`}>
+      {sections.map((sec, idx) => {
+        const sectionKey = sectionExportKey(sec, idx);
+        if (sec.kind === "kv") {
+          const handlers = bindSection(sectionKey, sec.entries.length);
+          return (
+            <JsonKeyValueTable
+              key={`kv-${idx}`}
+              title={sec.title}
+              entries={sec.entries}
+              sectionKey={sectionKey}
+              selection={selection}
+              {...handlers}
+            />
+          );
+        }
+        if (sec.kind === "array") {
+          const rows = Array.isArray(sec.rows) ? sec.rows : [];
+          const handlers = bindSection(sectionKey, rows.length);
+          return (
+            <JsonArraySection
+              key={`arr-${sec.title}-${idx}`}
+              title={sec.title}
+              rows={rows}
+              sectionKey={sectionKey}
+              selection={selection}
+              {...handlers}
+            />
+          );
+        }
+        return null;
+      })}
+    </div>
+  );
+}
+
+export type JsonResponseViewHandle = {
+  getSelection: () => VisualRowSelection;
+  selectedCount: () => number;
+  clearSelection: () => void;
+};
+
+type Props = {
+  data: unknown;
+  className?: string;
+  onSelectionChange?: (selection: VisualRowSelection) => void;
+};
+
+const JsonResponseView = forwardRef<JsonResponseViewHandle, Props>(function JsonResponseView(
+  { data, className, onSelectionChange },
+  ref,
+) {
+  const sections = useMemo(() => buildVisualSections(data), [data]);
+  const [selection, setSelectionState] = useState<VisualRowSelection>({});
+
+  const setSelection = (next: VisualRowSelection) => {
+    setSelectionState(next);
+    onSelectionChange?.(next);
+  };
+
+  useEffect(() => {
+    setSelection({});
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 仅随响应 JSON 重置
+  }, [data]);
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      getSelection: () => selection,
+      selectedCount: () => countSelectedRows(selection),
+      clearSelection: () => setSelection({}),
+    }),
+    [selection],
+  );
+
+  return (
+    <div className={`json-vis-root json-vis-root--tables${className ? ` ${className}` : ""}`}>
+      <JsonSectionStack sections={sections} selection={selection} onSelectionChange={setSelection} />
+    </div>
+  );
+});
+
+export default JsonResponseView;

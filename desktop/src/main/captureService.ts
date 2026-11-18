@@ -775,3 +775,5 @@ export function getRealTrafficGuide(ingestUrl: string | undefined, mitmPort: num
     ],
   };
 }
+
+export { getProjectCaptureProfile } from "./captureProfile";

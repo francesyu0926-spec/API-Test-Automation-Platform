@@ -1,7 +1,3 @@
-/** 南财终端常见 API 主机（PAC 模式：仅这些走 mitm） */
-export const NANCAI_TERMINAL_PAC_HOSTS =
-  "terminal.sfccn.com,sfccn.com,cfic.sfccn.com,vftc.sfccn.com";
-
 function tokenToHost(token: string): string {
   let t = token.trim();
   if (!t) return "";
@@ -25,8 +21,16 @@ export function parseHostListInput(input: string): string[] {
   return [...new Set(parts.map(tokenToHost).filter(Boolean))];
 }
 
-/** 内嵌模式的「直连」列表里若含业务 API 域，则请求不会出现在抓包列表 */
-export function embeddedBypassBlocksApiCapture(input: string): string[] {
-  const hosts = parseHostListInput(input);
-  return hosts.filter((h) => /(^|\.)sfccn\.com$/i.test(h));
+function hostMatchesProtected(bypassHost: string, protectedHost: string): boolean {
+  const b = bypassHost.toLowerCase();
+  const p = protectedHost.toLowerCase();
+  if (b === p) return true;
+  return b.endsWith(`.${p}`) || p.endsWith(`.${b}`);
+}
+
+/** 内嵌「直连」列表若含项目配置的 API 域，则请求不经 mitm */
+export function embeddedBypassBlocksApiCapture(bypassInput: string, protectedHosts: string[]): string[] {
+  if (!protectedHosts.length) return [];
+  const bypass = parseHostListInput(bypassInput);
+  return bypass.filter((h) => protectedHosts.some((p) => hostMatchesProtected(h, p)));
 }

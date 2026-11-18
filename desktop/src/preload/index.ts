@@ -10,6 +10,7 @@ import type {
   WsEvent,
   WsSendPayload,
 } from "../shared/apiWorkbenchTypes";
+import type { ProjectCaptureProfile } from "../shared/captureProfile";
 
 export type CaptureSessionRow = {
   id: string;
@@ -259,6 +260,11 @@ export type AtpApi = {
     relativePath: string,
     content: string,
   ) => Promise<{ ok: boolean; error?: string; relativePath?: string }>;
+  saveBytesWithDialog: (opts: {
+    defaultPath?: string;
+    base64: string;
+    filters?: Array<{ name: string; extensions: string[] }>;
+  }) => Promise<{ ok: boolean; filePath?: string; cancelled?: boolean; error?: string }>;
   saveTextWithDialog: (opts: {
     defaultPath?: string;
     content: string;
@@ -392,6 +398,7 @@ const api: AtpApi = {
     ipcRenderer.invoke("atp:updateProjectCase", projectId, caseName, yamlContent),
   deleteProjectCase: (projectId, caseName) => ipcRenderer.invoke("atp:deleteProjectCase", projectId, caseName),
   writeRepoFile: (relativePath, content) => ipcRenderer.invoke("atp:writeRepoFile", relativePath, content),
+  saveBytesWithDialog: (opts) => ipcRenderer.invoke("atp:saveBytesWithDialog", opts),
   saveTextWithDialog: (opts) => ipcRenderer.invoke("atp:saveTextWithDialog", opts),
   readAbsoluteFile: (filePath) => ipcRenderer.invoke("atp:readAbsoluteFile", filePath),
   pickOpenFile: (opts) => ipcRenderer.invoke("atp:pickOpenFile", opts),

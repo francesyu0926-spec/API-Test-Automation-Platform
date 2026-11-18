@@ -1,3 +1,11 @@
 name: 南财行情
 description: 通过桌面端创建
 default_environment: dev
+# 抓包 PAC：仅这些主机走 mitm（抓包页「项目 PAC 模板」一键填入）
+capture:
+  template_label: 终端 API PAC
+  pac_hosts:
+    - terminal.sfccn.com
+    - sfccn.com
+    - cfic.sfccn.com
+    - vftc.sfccn.com

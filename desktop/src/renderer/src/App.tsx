@@ -443,7 +443,7 @@ export default function App() {
         <button
           type="button"
           className="nav-btn nav-btn--compact sidebar-network-restore"
-          title="南财等客户端卡在 SFConnecting 时：关闭残留抓包代理并重置 WinHTTP"
+          title="桌面客户端卡在 Connecting 时：关闭残留抓包代理并重置 WinHTTP"
           onClick={() => {
             void window.atp.restoreNetworkOnly().then((r) => notify(r.message));
           }}
@@ -704,8 +704,7 @@ export default function App() {
           <PanelErrorBoundary name="api-workbench">
             <ApiWorkbench
               project={selectedProject}
-              projects={projects}
-              onProjectChange={setSelectedProject}
+              projectName={selectedProjectName}
               externalDraft={workbenchDraft}
               collectionReloadNonce={workbenchCollectionNonce}
               onConsumeExternalDraft={consumeWorkbenchDraft}

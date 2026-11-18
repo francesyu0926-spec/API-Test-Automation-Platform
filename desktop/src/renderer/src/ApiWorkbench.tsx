@@ -30,13 +30,21 @@ import {
   shouldSuggestWsAfterHttp,
 } from "./workbenchWsHint";
 import { applyImportedCurlAuth, unresolvedWorkbenchVars } from "./samplerAuth";
-
-type ProjectOption = { id: string; name: string };
+import JsonResponseView, { type JsonResponseViewHandle } from "./JsonResponseView";
+import { countSelectedRows } from "./jsonVisualSelection";
+import { parseResponseJson } from "./parseResponseJson";
+import {
+  PNG_EXPORT_MAX_ROWS,
+  buildExportSheets,
+  exportSheetsToPngBase64,
+  exportSheetsToXlsxBase64,
+  suggestExportBaseName,
+} from "./jsonVisualExport";
+import { saveBytesWithDialog } from "./saveBytesWithDialog";
 
 type Props = {
   project: string;
-  projects: ProjectOption[];
-  onProjectChange: (projectId: string) => void;
+  projectName?: string;
   externalDraft: WorkbenchDraft | null;
   collectionReloadNonce?: number;
   onConsumeExternalDraft: () => void;
@@ -72,8 +80,7 @@ function formatWsTime(): string {
 
 export default function ApiWorkbench({
   project,
-  projects,
-  onProjectChange,
+  projectName,
   externalDraft,
   collectionReloadNonce = 0,
   onConsumeExternalDraft,
@@ -91,6 +98,10 @@ export default function ApiWorkbench({
   const [reqTab, setReqTab] = useState<ReqTab>("params");
   const [sending, setSending] = useState(false);
   const [response, setResponse] = useState<HttpSendResult | null>(null);
+  const [respBodyMode, setRespBodyMode] = useState<"raw" | "visual">("visual");
+  const [visualExportBusy, setVisualExportBusy] = useState(false);
+  const [visualSelectedCount, setVisualSelectedCount] = useState(0);
+  const jsonVisualRef = useRef<JsonResponseViewHandle>(null);
   const [respView, setRespView] = useState<"body" | "headers">("body");
   const [toast, setToast] = useState("");
   const [wsSwitchHint, setWsSwitchHint] = useState(false);
@@ -729,6 +740,15 @@ export default function ApiWorkbench({
     if (!response.bodyBase64 || !response.bodyMime) return null;
     return `data:${response.bodyMime};base64,${response.bodyBase64}`;
   }, [response, respView]);
+  const responseContentType = useMemo(() => {
+    if (!response) return "";
+    return response.headers["content-type"] ?? response.headers["Content-Type"] ?? "";
+  }, [response]);
+
+  const responseJson = useMemo(() => {
+    if (!response?.bodyText) return null;
+    return parseResponseJson(response.bodyText, responseContentType);
+  }, [response, responseContentType]);
 
   const responseBodyDisplay = useMemo(() => {
     if (!response) return "";
@@ -736,10 +756,84 @@ export default function ApiWorkbench({
     if (responseImageSrc) return response.bodyText;
     const emptyHint = httpEmptyBodyHint(response.status, response.bodySize);
     if (!response.bodyText && emptyHint) return emptyHint;
-    const ct = response.headers["content-type"] ?? response.headers["Content-Type"] ?? "";
-    if (/json/i.test(ct) && response.bodyText) return formatJsonBody(response.bodyText);
+    if (/json/i.test(responseContentType) && response.bodyText) return formatJsonBody(response.bodyText);
+    if (responseJson) return formatJsonBody(response.bodyText);
     return response.bodyText;
-  }, [response, respView, responseImageSrc]);
+  }, [response, respView, responseImageSrc, responseContentType, responseJson]);
+
+  const exportVisualTable = useCallback(
+    async (format: "xlsx" | "png", xlsxScope: "all" | "selected" = "all") => {
+      if (!responseJson || visualExportBusy) return;
+      if (format === "xlsx" && xlsxScope === "selected" && visualSelectedCount === 0) {
+        showToast("请先在可视化表格中勾选要导出的行（表头可全选含未显示行）");
+        return;
+      }
+      if (format === "png") {
+        if (visualSelectedCount === 0) {
+          showToast("PNG 仅导出勾选行：请先在可视化表格中勾选（最多 20 条）");
+          return;
+        }
+        if (visualSelectedCount > PNG_EXPORT_MAX_ROWS) {
+          showToast(`PNG 最多 ${PNG_EXPORT_MAX_ROWS} 条记录，当前已选 ${visualSelectedCount} 条，请减少勾选或使用 XLSX·所选`);
+          return;
+        }
+      }
+      setVisualExportBusy(true);
+      try {
+        const selection = jsonVisualRef.current?.getSelection() ?? {};
+        const exportMode =
+          format === "png" ? "selected" : xlsxScope === "selected" ? "selected" : "all";
+        const sheets = buildExportSheets(responseJson, {
+          mode: exportMode,
+          selection,
+        });
+        if (!sheets.length) {
+          showToast(
+            exportMode === "selected" ? "所选行无法生成工作表，请检查勾选" : "无可导出数据",
+          );
+          return;
+        }
+        const url = buildUrl(draft.url, draft.query);
+        const base = suggestExportBaseName(url || "response");
+        const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+        const scopeSuffix = exportMode === "selected" ? "-selected" : "";
+        if (format === "xlsx") {
+          const res = await saveBytesWithDialog({
+            defaultPath: `${base}-${stamp}${scopeSuffix}.xlsx`,
+            base64: exportSheetsToXlsxBase64(sheets),
+            filters: [{ name: "Excel 工作簿", extensions: ["xlsx"] }],
+          });
+          if (res.ok && res.filePath) {
+            const label = xlsxScope === "selected" ? `所选 ${visualSelectedCount} 行` : "全量数据";
+            showToast(
+              res.error?.includes("主进程") ? res.error : `已导出 XLSX（${label}）：${res.filePath}`,
+            );
+          } else if (!res.cancelled && res.error) showToast(`导出失败：${res.error}`);
+        } else {
+          const { base64, truncated } = exportSheetsToPngBase64(sheets);
+          const res = await saveBytesWithDialog({
+            defaultPath: `${base}-${stamp}${scopeSuffix}.png`,
+            base64,
+            filters: [{ name: "PNG 图片", extensions: ["png"] }],
+          });
+          if (res.ok && res.filePath) {
+            const label = `所选 ${visualSelectedCount} 条`;
+            const tail = truncated ? "（部分工作表在图内被截断）" : "";
+            showToast(
+              res.error?.includes("主进程")
+                ? res.error
+                : `已导出 PNG（${label}）${tail}：${res.filePath}`,
+            );
+          } else if (!res.cancelled && res.error) showToast(`导出失败：${res.error}`);
+        }
+      } catch (e) {
+        showToast(e instanceof Error ? e.message : String(e));
+      } finally {
+        setVisualExportBusy(false);
+      }
+    },
+    [responseJson, visualExportBusy, visualSelectedCount, draft.url, draft.query],
+  );
 
   const headerCount = draft.headers.filter((h) => h.enabled && h.key.trim()).length;
 
@@ -834,35 +928,14 @@ export default function ApiWorkbench({
       <header className="workbench-topbar">
         <div className="module-head-row workbench-head-row">
           <h2 className="page-head workbench-title">API 工作台</h2>
-          <div className="workbench-project-switch">
-            <span className="workbench-topbar-label">项目</span>
-            <select
-              className="workbench-topbar-control workbench-topbar-control--project"
-              value={project}
-              disabled={!projects.length}
-              onChange={(e) => {
-                const next = e.target.value;
-                if (next && next !== project) onProjectChange(next);
-              }}
-              aria-label="项目"
-              title={project ? `项目 ID：${project}` : "选择项目"}
+          {project ? (
+            <span
+              className="module-context-chip workbench-project-chip"
+              title={`项目 ID：${project} · 在左侧「工作区项目」切换`}
             >
-              {!projects.length ? (
-                <option value="">暂无项目</option>
-              ) : (
-                projects.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.name}
-                  </option>
-                ))
-              )}
-            </select>
-            {project ? (
-              <span className="workbench-project-id" title={project}>
-                {project}
-              </span>
-            ) : null}
-          </div>
+              {projectName?.trim() || project}
+            </span>
+          ) : null}
         </div>
         <EnvContextBar
           envName={envName}
@@ -1292,6 +1365,70 @@ export default function ApiWorkbench({
                   >
                     Headers
                   </button>
+                  {responseJson != null && respView === "body" ? (
+                    <span className="workbench-response-format" role="group" aria-label="响应体格式">
+                      <button
+                        type="button"
+                        className={`workbench-tab small${respBodyMode === "visual" ? " active" : ""}`}
+                        onClick={() => setRespBodyMode("visual")}
+                      >
+                        可视化
+                      </button>
+                      <button
+                        type="button"
+                        className={`workbench-tab small${respBodyMode === "raw" ? " active" : ""}`}
+                        onClick={() => setRespBodyMode("raw")}
+                      >
+                        JSON
+                      </button>
+                      {respBodyMode === "visual" ? (
+                        <span className="workbench-response-export">
+                          <button
+                            type="button"
+                            className="nav-btn nav-btn--compact"
+                            disabled={visualExportBusy}
+                            title="导出接口返回的全部数据（多工作表）"
+                            onClick={() => void exportVisualTable("xlsx", "all")}
+                          >
+                            XLSX·全部
+                          </button>
+                          <button
+                            type="button"
+                            className="nav-btn nav-btn--compact"
+                            disabled={visualExportBusy || visualSelectedCount === 0}
+                            title={
+                              visualSelectedCount
+                                ? `仅导出已勾选的 ${visualSelectedCount} 行`
+                                : "请先在表中勾选行"
+                            }
+                            onClick={() => void exportVisualTable("xlsx", "selected")}
+                          >
+                            XLSX·所选{visualSelectedCount ? ` (${visualSelectedCount})` : ""}
+                          </button>
+                          <button
+                            type="button"
+                            className="nav-btn nav-btn--compact"
+                            disabled={
+                              visualExportBusy ||
+                              visualSelectedCount === 0 ||
+                              visualSelectedCount > PNG_EXPORT_MAX_ROWS
+                            }
+                            title={
+                              visualSelectedCount > PNG_EXPORT_MAX_ROWS
+                                ? `PNG 最多 ${PNG_EXPORT_MAX_ROWS} 条，请减少勾选`
+                                : `仅导出已勾选的行（最多 ${PNG_EXPORT_MAX_ROWS} 条）`
+                            }
+                            onClick={() => void exportVisualTable("png")}
+                          >
+                            PNG·所选
+                            {visualSelectedCount
+                              ? ` (${visualSelectedCount}/${PNG_EXPORT_MAX_ROWS})`
+                              : ""}
+                          </button>
+                        </span>
+                      ) : null}
+                    </span>
+                  ) : null}
                 </>
               )}
               {protocol === "ws" && wsLog.length > 0 && (
@@ -1338,6 +1475,13 @@ export default function ApiWorkbench({
                 <img className="workbench-response-image" src={responseImageSrc} alt="响应图片" />
                 <p className="hint workbench-response-image-meta">{responseBodyDisplay}</p>
               </div>
+            ) : responseJson != null && respBodyMode === "visual" ? (
+              <JsonResponseView
+                ref={jsonVisualRef}
+                data={responseJson}
+                className="workbench-response-visual"
+                onSelectionChange={(sel) => setVisualSelectedCount(countSelectedRows(sel))}
+              />
             ) : (
               <pre className="workbench-response-pre">{responseBodyDisplay || response.error || "(空响应)"}</pre>
             )}

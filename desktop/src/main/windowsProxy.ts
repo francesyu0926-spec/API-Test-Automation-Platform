@@ -110,7 +110,7 @@ export function winHttpPointsToMitm(text: string, mitmPort = 8888): boolean {
   return t.includes(`127.0.0.1:${mitmPort}`) || new RegExp(`:\\s*127\\.0\\.0\\.1\\s*:\\s*${mitmPort}`).test(t);
 }
 
-/** WinHTTP 已 import 系统 PAC 或仍指向本机抓包时（南财等客户端常走 WinHTTP） */
+/** WinHTTP 已 import 系统 PAC 或仍指向本机抓包时（部分桌面客户端常走 WinHTTP） */
 export function winHttpIndicatesCaptureProxy(text: string, mitmPort = 8888): boolean {
   const t = text.toLowerCase();
   if (!t.trim() || t.includes("direct access")) return false;

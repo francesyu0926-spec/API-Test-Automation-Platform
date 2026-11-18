@@ -16,7 +16,8 @@ import { buildBatchCaseRows } from "./captureBatchCases";
 import { captureTxToCaseMeta, captureTxToCaseYaml } from "./caseYaml";
 import { transactionToCurl } from "./captureCurl";
 import { filterTransactions, isCaptureSelfTestRow } from "./captureFilters";
-import { embeddedBypassBlocksApiCapture, NANCAI_TERMINAL_PAC_HOSTS } from "./capturePacHints";
+import { embeddedBypassBlocksApiCapture } from "./capturePacHints";
+import type { ProjectCaptureProfile } from "../../shared/captureProfile";
 import {
   asCaptureTransaction,
   captureBodyImageSrc,
@@ -30,7 +31,7 @@ import {
 import { httpStatusTone } from "./apiWorkbenchModel";
 import type { WorkbenchDraft } from "../../shared/apiWorkbenchTypes";
 
-const PAC_HOSTS_STORAGE = "atp-capture-pac-hosts";
+const pacHostsStorageKey = (projectId: string) => `atp-capture-pac-hosts:${projectId || "_"}`;
 const PAC_HOSTS_PLACEHOLDER = "api.example.com,api.yourcorp.com";
 
 type CaptureDetailTab = "response" | "request" | "curl" | "yaml" | "raw";
@@ -75,15 +76,8 @@ export default function CapturePanel({
   const [selectedSession, setSelectedSession] = useState<string>("");
   const [label, setLabel] = useState("");
   const [proxyMode, setProxyMode] = useState<CaptureProxyMode>("pac");
-  const [pacHosts, setPacHosts] = useState(() => {
-    try {
-      const saved = localStorage.getItem(PAC_HOSTS_STORAGE);
-      if (saved?.trim()) return saved;
-    } catch {
-      /* ignore */
-    }
-    return "";
-  });
+  const [pacHosts, setPacHosts] = useState("");
+  const [captureProfile, setCaptureProfile] = useState<ProjectCaptureProfile | null>(null);
   const [ingest, setIngest] = useState<Awaited<ReturnType<typeof window.atp.getIngestStatus>>>({
     running: false,
   });
@@ -119,27 +113,68 @@ export default function CapturePanel({
   const [batchSaveOpen, setBatchSaveOpen] = useState(false);
   const [batchSaving, setBatchSaving] = useState(false);
   const [detailTab, setDetailTab] = useState<CaptureDetailTab>("response");
+
   useEffect(() => {
+    if (!project) {
+      setCaptureProfile(null);
+      return;
+    }
+    void window.atp.getProjectCaptureProfile(project).then(setCaptureProfile);
+  }, [project]);
+
+  const protectedApiHosts = useMemo(() => captureProfile?.pacHosts ?? [], [captureProfile]);
+
+  useEffect(() => {
+    if (!project) {
+      setPacHosts("");
+      return;
+    }
     try {
-      localStorage.setItem(PAC_HOSTS_STORAGE, pacHosts);
+      const saved = localStorage.getItem(pacHostsStorageKey(project));
+      if (saved != null) {
+        setPacHosts(saved);
+        return;
+      }
     } catch {
       /* ignore */
     }
-  }, [pacHosts]);
+    setPacHosts(captureProfile?.pacHostsCsv ?? "");
+  }, [project, captureProfile?.pacHostsCsv]);
+
+  useEffect(() => {
+    if (!project) return;
+    try {
+      localStorage.setItem(pacHostsStorageKey(project), pacHosts);
+    } catch {
+      /* ignore */
+    }
+  }, [project, pacHosts]);
 
   const capturing = ingest.running || mitm.running;
   const embeddedMisconfigured = useMemo(
-    () => proxyMode === "embedded" && embeddedBypassBlocksApiCapture(pacHosts).length > 0,
-    [proxyMode, pacHosts],
+    () => proxyMode === "embedded" && embeddedBypassBlocksApiCapture(pacHosts, protectedApiHosts).length > 0,
+    [proxyMode, pacHosts, protectedApiHosts],
   );
   const embeddedBlockedHosts = useMemo(
-    () => (embeddedMisconfigured ? embeddedBypassBlocksApiCapture(pacHosts) : []),
-    [embeddedMisconfigured, pacHosts],
+    () =>
+      embeddedMisconfigured ? embeddedBypassBlocksApiCapture(pacHosts, protectedApiHosts) : [],
+    [embeddedMisconfigured, pacHosts, protectedApiHosts],
   );
-  const applyNancaiPacTemplate = () => {
+  const applyProjectPacTemplate = () => {
     setProxyMode("pac");
-    setPacHosts(NANCAI_TERMINAL_PAC_HOSTS);
+    const csv = captureProfile?.pacHostsCsv?.trim();
+    if (csv) {
+      setPacHosts(csv);
+      setMessage("");
+      return;
+    }
+    setMessage("未配置 PAC 主机：请在项目 project.yaml 的 capture.pac_hosts 中填写，或在环境变量 base_url 等中提供 API 地址。");
   };
+  const applyPacPreset = (hosts: string) => {
+    setProxyMode("pac");
+    setPacHosts(hosts.trim());
+  };
+
   const businessTxCount = useMemo(
     () => transactions.filter((t) => !isCaptureSelfTestRow(t)).length,
     [transactions],
@@ -305,7 +340,7 @@ export default function CapturePanel({
         return {
           title: "等待业务流量",
           hint:
-            "开始抓包时有一条 www.baidu.com 链路自检（验证 MITM→Ingest），不会出现在列表中。请用 Chrome 或已重启的南财访问目标站点；列表约每 2 秒刷新。",
+            "开始抓包时有一条 www.baidu.com 链路自检（验证 MITM→Ingest），不会出现在列表中。请用 Chrome 或已重启的目标客户端访问站点；列表约每 2 秒刷新。",
           action: null,
         };
       }
@@ -459,8 +494,8 @@ export default function CapturePanel({
     if (embeddedMisconfigured) {
       const blocked = embeddedBlockedHosts.join(", ");
       setPendingConfirm({
-        title: "直连列表会挡住南财 API",
-        message: `内嵌网页模式下，「直连域名」不经 mitm。当前含 ${blocked}，南财终端请求会直连，列表通常为空。建议点取消后改用「PAC（按域名）」并填入 API 主机；若仅抓 WebView 外链可仍继续。`,
+        title: "直连列表会挡住业务 API",
+        message: `内嵌网页模式下，「直连域名」不经 mitm。当前含 ${blocked}，这些域名的请求会直连，列表通常为空。建议点取消后改用「PAC（按域名）」并填入项目 API 主机；若仅抓 WebView 外链可仍继续。`,
         confirmLabel: "仍要开始",
         run: () => void runQuickCaptureStart(),
       });
@@ -712,14 +747,15 @@ export default function CapturePanel({
 
         {!capturing && (
           <p className="hint">
-            南财等<strong>桌面终端</strong>：请用 <strong>PAC（按域名）</strong>，把 API 主机填在下栏（不要放在内嵌模式的「直连」）。安装证书 → 开始抓包 →
-            <strong>完全退出</strong>终端再打开。慎用「全局代理」（易白屏）。
+            <strong>桌面客户端</strong>：请用 <strong>PAC（按域名）</strong>，把 API 主机填在下栏（不要放在内嵌模式的「直连」）。可在{" "}
+            <code>project.yaml</code> 配置 <code>capture.pac_hosts</code> 后点「项目 PAC 模板」。安装证书 → 开始抓包 →
+            <strong>完全退出</strong>客户端再打开。慎用「全局代理」（易白屏）。
           </p>
         )}
         {embeddedMisconfigured && !capturing && (
           <p className="hint warn">
             当前为内嵌网页，且直连列表含 <code>{embeddedBlockedHosts.join(", ")}</code>，这些域名的 HTTPS <strong>不会进 mitm</strong>
-            ，南财 API 无法出现在列表。请点「改用南财 PAC 抓包」或清空直连后只用 PAC 模式填写 API 域名。
+            ，业务 API 无法出现在列表。请点「改用 PAC 抓包」或清空直连后只用 PAC 模式填写 API 域名。
           </p>
         )}
         {(proxyMode === "pac" || proxyMode === "embedded") && !capturing && (
@@ -751,23 +787,45 @@ export default function CapturePanel({
                   清空直连
                 </button>
               ) : (
-                <button
-                  type="button"
-                  className="nav-btn nav-btn--compact"
-                  disabled={capturing}
-                  title="填入南财常见 API 主机并切换到 PAC 模式"
-                  onClick={applyNancaiPacTemplate}
-                >
-                  南财 PAC 模板
-                </button>
+                <>
+                  <button
+                    type="button"
+                    className="nav-btn nav-btn--compact"
+                    disabled={capturing || !captureProfile?.pacHostsCsv}
+                    title="填入本项目 capture.pac_hosts（或从环境 base_url 推导）并切换到 PAC"
+                    onClick={applyProjectPacTemplate}
+                  >
+                    {captureProfile?.templateLabel ?? "项目 PAC 模板"}
+                  </button>
+                  {captureProfile?.presets?.length ? (
+                    <select
+                      className="text-input capture-pac-preset-select"
+                      disabled={capturing}
+                      defaultValue=""
+                      title="platform.config.yaml 中的全局 PAC 预设"
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        if (v) applyPacPreset(v);
+                        e.target.value = "";
+                      }}
+                    >
+                      <option value="">全局预设…</option>
+                      {captureProfile.presets.map((p) => (
+                        <option key={p.id} value={p.hosts}>
+                          {p.label}
+                        </option>
+                      ))}
+                    </select>
+                  ) : null}
+                </>
               )}
             </div>
           </div>
         )}
         {embeddedMisconfigured && !capturing && (
           <div className="capture-pac-fix-row">
-            <button type="button" className="primary" onClick={applyNancaiPacTemplate}>
-              改用南财 PAC 抓包
+            <button type="button" className="primary" onClick={applyProjectPacTemplate}>
+              改用 PAC 抓包
             </button>
           </div>
         )}
@@ -785,7 +843,7 @@ export default function CapturePanel({
         )}
         {capturing && embeddedMisconfigured && (
           <p className="hint warn">
-            当前内嵌模式将 {embeddedBlockedHosts.join(", ")} 设为<strong>直连</strong>，南财 API 不会进列表。请「停止」后点「改用南财 PAC 抓包」重新开始。
+            当前内嵌模式将 {embeddedBlockedHosts.join(", ")} 设为<strong>直连</strong>，业务 API 不会进列表。请「停止」后点「改用 PAC 抓包」重新开始。
           </p>
         )}
         {capturing && businessTxCount === 0 && !embeddedMisconfigured && (

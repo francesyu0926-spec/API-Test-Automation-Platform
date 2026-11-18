@@ -651,6 +651,13 @@ body {
   min-width: 200px;
 }
 
+.capture-pac-preset-select {
+  flex: 0 0 auto;
+  width: max(7.5rem, 30%);
+  max-width: 160px;
+  font-size: 12px;
+}
+
 .capture-pac-inline {
   font-size: 11px;
   word-break: break-all;
@@ -3505,6 +3512,265 @@ tr.capture-tx-row--checked {
 .workbench-response-image-meta {
   margin: 0;
   font-size: 12px;
+}
+
+.workbench-response-format {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 6px;
+  padding-left: 8px;
+  border-left: 1px solid var(--border-soft);
+  flex-wrap: wrap;
+}
+
+.workbench-response-export {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 4px;
+  padding-left: 6px;
+  border-left: 1px solid var(--border-soft);
+}
+
+.workbench-response-visual,
+.json-vis-root {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  margin: 0;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: 12px;
+}
+
+.json-vis-root--tables {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.json-vis-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.json-vis-stack--nested {
+  gap: 10px;
+  margin-top: 6px;
+  padding: 8px;
+  border-radius: 6px;
+  border: 1px dashed var(--border);
+  background: rgb(0 0 0 / 0.12);
+}
+
+.json-vis-section-title {
+  margin: 0 0 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent-text);
+  letter-spacing: 0.02em;
+}
+
+.json-vis-section--nested .json-vis-section-title {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.json-vis-table--kv .json-vis-kv-key {
+  width: 28%;
+  max-width: 200px;
+  font-weight: 500;
+  color: #7eb6e8;
+  white-space: nowrap;
+}
+
+.json-vis-kv-val {
+  word-break: break-word;
+}
+
+.json-vis-cell-complex {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  min-width: 4rem;
+}
+
+.json-vis-expand-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin: 0;
+  padding: 2px 6px;
+  border: 1px solid var(--border-soft);
+  border-radius: 4px;
+  background: rgb(var(--accent-rgb) / 0.1);
+  color: var(--text);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.json-vis-expand-btn:hover {
+  background: rgb(var(--accent-rgb) / 0.18);
+}
+
+.json-vis-cell-nested {
+  width: 100%;
+  min-width: 280px;
+  max-width: min(960px, 90vw);
+  overflow: auto;
+}
+
+.json-vis-table-wrap {
+  overflow: auto;
+  max-height: 100%;
+}
+
+.json-vis-table-hint {
+  margin: 0 0 8px;
+  font-size: 11px;
+}
+
+.json-vis-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+
+.json-vis-table th,
+.json-vis-table td {
+  padding: 6px 8px;
+  border: 1px solid var(--border-soft);
+  text-align: left;
+  vertical-align: top;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.json-vis-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: #151d2e;
+  color: var(--accent-text);
+  font-weight: 600;
+}
+
+.json-vis-table tbody tr:nth-child(even) {
+  background: rgb(255 255 255 / 0.02);
+}
+
+.json-vis-table tbody tr:hover {
+  background: rgb(var(--accent-rgb) / 0.08);
+}
+
+.json-vis-table-idx {
+  width: 2.5rem;
+  color: var(--muted);
+  text-align: right !important;
+}
+
+.json-vis-table-sel {
+  width: 2rem;
+  text-align: center;
+  vertical-align: middle;
+}
+
+.json-vis-table-sel input[type="checkbox"] {
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.json-vis-table tbody tr.json-vis-row--selected {
+  background: rgb(var(--accent-rgb) / 0.12);
+}
+
+.json-vis-table-nested {
+  font-size: 10px;
+  color: var(--muted);
+}
+
+.json-vis-tree {
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  line-height: 1.45;
+}
+
+.json-vis-tree-toggle {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  width: 100%;
+  margin: 0;
+  padding: 2px 4px 2px 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.json-vis-tree-toggle:hover {
+  background: var(--panel-hover);
+}
+
+.json-vis-chevron {
+  width: 1em;
+  flex-shrink: 0;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.json-vis-key {
+  color: #7eb6e8;
+}
+
+.json-vis-bracket {
+  color: var(--muted);
+}
+
+.json-vis-summary {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.json-vis-tree-leaf {
+  padding: 1px 4px 1px 0;
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  word-break: break-word;
+}
+
+.json-vis-val--string {
+  color: #9dd9a0;
+}
+
+.json-vis-val--number {
+  color: #e8c07a;
+}
+
+.json-vis-val--boolean {
+  color: #c792ea;
+}
+
+.json-vis-val--null {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.json-vis-muted {
+  color: var(--muted);
+}
+
+.json-vis-tree-close {
+  padding: 2px 0;
 }
 
 .workbench-ws-hint {

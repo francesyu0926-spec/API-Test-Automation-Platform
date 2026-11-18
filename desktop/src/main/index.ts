@@ -152,6 +152,9 @@ ipcMain.handle(
 );
 
 ipcMain.handle("atp:captureConfig", () => capture.loadCaptureConfig());
+ipcMain.handle("atp:getProjectCaptureProfile", (_e, projectId: string) =>
+  capture.getProjectCaptureProfile(projectId),
+);
 ipcMain.handle("atp:listCaptureSessions", (_e, project: string) =>
   capture.listCaptureSessions(project),
 );
@@ -394,6 +397,33 @@ ipcMain.handle(
     if (canceled || !filePath) return { ok: false, cancelled: true };
     try {
       await fs.writeFile(filePath, opts.content.endsWith("\n") ? opts.content : `${opts.content}\n`, "utf8");
+      return { ok: true, filePath };
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  },
+);
+
+ipcMain.handle(
+  "atp:saveBytesWithDialog",
+  async (
+    _e,
+    opts: {
+      defaultPath?: string;
+      base64: string;
+      filters?: Array<{ name: string; extensions: string[] }>;
+    },
+  ) => {
+    const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0];
+    if (!win) return { ok: false, error: "无活动窗口" };
+    const { canceled, filePath } = await dialog.showSaveDialog(win, {
+      defaultPath: opts.defaultPath,
+      filters: opts.filters ?? [{ name: "File", extensions: ["bin"] }],
+    });
+    if (canceled || !filePath) return { ok: false, cancelled: true };
+    try {
+      const buf = Buffer.from(opts.base64, "base64");
+      await fs.writeFile(filePath, buf);
       return { ok: true, filePath };
     } catch (e) {
       return { ok: false, error: e instanceof Error ? e.message : String(e) };
