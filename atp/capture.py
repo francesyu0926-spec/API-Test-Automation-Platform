@@ -89,6 +89,8 @@ def ingest_transaction(session_dir: Path, payload: dict[str, Any], redact_header
             "url": url,
             "captured_at": tx["captured_at"],
             "file": f"tx/{tx_id}.json",
+            "status": int(resp.get("status") or 0),
+            "duration_ms": resp.get("duration_ms"),
         },
     )
     return tx_id

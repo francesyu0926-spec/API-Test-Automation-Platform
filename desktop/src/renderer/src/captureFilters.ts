@@ -52,7 +52,17 @@ export function isLikelyApiTransaction(t: TxRowLike): boolean {
   return false;
 }
 
+/** 启动抓包时的 MITM 自检请求，不应与业务流量混淆 */
+export function isCaptureSelfTestRow(t: TxRowLike): boolean {
+  const u = (t.url || "").trim().toLowerCase();
+  if (!u) return false;
+  if (u.includes("httpbin.org") && u.includes("from=atp-desktop")) return true;
+  if (/^https?:\/\/www\.baidu\.com\/?$/i.test(u)) return true;
+  return false;
+}
+
 export function filterTransactions<T extends TxRowLike>(rows: T[], apiOnly: boolean): T[] {
-  if (!apiOnly) return rows;
-  return rows.filter(isLikelyApiTransaction);
+  const withoutProbe = rows.filter((t) => !isCaptureSelfTestRow(t));
+  if (!apiOnly) return withoutProbe;
+  return withoutProbe.filter(isLikelyApiTransaction);
 }

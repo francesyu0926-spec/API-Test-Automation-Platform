@@ -8,18 +8,22 @@ import yaml from "js-yaml";
 
 import { getRepoRoot } from "./repo";
 import { runPython, spawnPythonDetached } from "./pythonRun";
-import { hostsForPac } from "./captureHosts";
+import { hostsForPac, parseCaptureHostList } from "./captureHosts";
 import { probeHttpsViaMitm } from "./captureProbe";
 import { stopPacHttpServer, startPacHttpServer } from "./pacHttp";
-import { disablePacProxy, enablePacProxy, writePacFile } from "./pacProxy";
+import { disablePacProxy, enablePacProxy, writeEmbeddedWebPacFile, writePacFile } from "./pacProxy";
 import {
   forceDisableSystemProxy,
   getWindowsProxyStatus,
+  getWinHttpProxyStatus,
   isLikelyAtpCaptureProxy,
   isPortListening,
   readProxyState,
+  resetWinHttpProxyAlways,
   restoreWindowsSystemProxy,
   setWindowsSystemProxy,
+  importWinHttpProxyFromIe,
+  winHttpPointsToMitm,
 } from "./windowsProxy";
 
 export type CaptureConfig = {
@@ -44,6 +48,8 @@ export type CaptureTxIndexRow = {
   url: string;
   captured_at: string;
   file: string;
+  status?: number;
+  duration_ms?: number;
 };
 
 type IngestState = {
@@ -388,23 +394,52 @@ export function stopIngestOnQuit(): void {
   void stopPacHttpServer();
 }
 
-/** 启动时：MITM 未监听但系统仍走 ATP 代理时，自动恢复上网 */
+/** 启动时：MITM 未监听但系统/WinHTTP 仍走 ATP 代理时，自动恢复上网（避免桌面客户端一直 Connecting） */
 export async function recoverStaleCaptureProxy(mitmPort = 8888): Promise<string | undefined> {
   if (mitmState || getMitmStatus().running) return undefined;
   const listening = await isPortListening(mitmPort);
   if (listening) return undefined;
   const proxy = readProxyState();
-  if (!isLikelyAtpCaptureProxy(proxy, mitmPort)) return undefined;
-  await forceDisableSystemProxy();
-  await stopPacHttpServer();
-  return "检测到残留抓包代理且 8888 未运行，已自动关闭系统代理。请刷新浏览器。";
+  const winHttp = await getWinHttpProxyStatus();
+  const ieStale = isLikelyAtpCaptureProxy(proxy, mitmPort);
+  const winHttpStale = winHttpPointsToMitm(winHttp, mitmPort);
+  if (!ieStale && !winHttpStale) return undefined;
+  const parts: string[] = [];
+  if (ieStale) {
+    await forceDisableSystemProxy();
+    await stopPacHttpServer();
+    parts.push("已关闭残留的系统代理/PAC");
+  } else if (winHttpStale) {
+    await resetWinHttpProxyAlways();
+    parts.push("已重置 WinHTTP 代理");
+  }
+  if (winHttpStale && ieStale) {
+    await resetWinHttpProxyAlways();
+    parts.push("已重置 WinHTTP");
+  }
+  parts.push("请完全退出受代理影响的桌面客户端后重新打开");
+  return parts.join("；");
+}
+
+export async function ensureNetworkDirect(mitmPort = 8888): Promise<{ recovered: boolean; messages: string[] }> {
+  const note = await recoverStaleCaptureProxy(mitmPort);
+  if (note) return { recovered: true, messages: [note] };
+  return { recovered: false, messages: [] };
 }
 
 export async function restoreNetworkOnly(): Promise<{ message: string }> {
   await stopMitm();
   const net = await forceDisableSystemProxy();
   await stopPacHttpServer();
-  return { message: net.message };
+  const winHttp = await getWinHttpProxyStatus();
+  let extra = "";
+  if (winHttpPointsToMitm(winHttp, 8888)) {
+    await resetWinHttpProxyAlways();
+    extra = "；已重置 WinHTTP（桌面终端）";
+  }
+  return {
+    message: `${net.message}${extra}。若客户端仍显示 Connecting，请完全退出该应用后重开。`,
+  };
 }
 
 export async function resolveMitmBinary(): Promise<string | null> {
@@ -456,7 +491,7 @@ export async function startMitm(options: {
   hostFilter?: string;
   listenPort?: number;
   setSystemProxy?: boolean;
-  proxyMode?: "pac" | "global";
+  proxyMode?: "pac" | "global" | "embedded";
   pacHosts?: string;
 }): Promise<{ ok: boolean; error?: string; proxy?: string; systemProxyMessage?: string }> {
   if (mitmState && isProcessRunning(mitmState.process)) {
@@ -537,10 +572,28 @@ export async function startMitm(options: {
   if (options.setSystemProxy !== false) {
     const usePac = options.proxyMode !== "global";
     if (usePac) {
-      const pacList = hostsForPac(
-        options.pacHosts?.trim() || options.hostFilter?.trim() || "",
-      );
-      const pacPath = await writePacFile(pacList, listenPort);
+      const bypassInput = options.pacHosts?.trim() || options.hostFilter?.trim() || "";
+      const isEmbedded = options.proxyMode === "embedded";
+      let pacPath: string;
+      let pacList: string[];
+      if (isEmbedded) {
+        pacList = parseCaptureHostList(bypassInput);
+        pacPath = await writeEmbeddedWebPacFile(bypassInput, listenPort);
+      } else {
+        pacList = hostsForPac(bypassInput);
+        if (!pacList.length) {
+          mitmChild.kill();
+          mitmState = null;
+          return { ok: false, error: "PAC 模式下请填写要快照的 API 域名（逗号分隔）" };
+        }
+        try {
+          pacPath = await writePacFile(pacList, listenPort);
+        } catch (e) {
+          mitmChild.kill();
+          mitmState = null;
+          return { ok: false, error: e instanceof Error ? e.message : String(e) };
+        }
+      }
       const pacBody = await fs.readFile(pacPath, "utf8");
       const pacHttp = await startPacHttpServer(pacBody);
       if (!pacHttp.ok || !pacHttp.url) {
@@ -549,7 +602,15 @@ export async function startMitm(options: {
         return { ok: false, error: pacHttp.error ?? "PAC 本地服务启动失败" };
       }
       const r = enablePacProxy(pacHttp.url);
-      systemProxyMessage = `${r.message} 已路由域名：${pacList.join(", ")}。未在此列表中的站点不会进流量列表。`;
+      let winHttpSync = "";
+      const winHttp = await importWinHttpProxyFromIe();
+      if (winHttp.ok) winHttpSync = ` ${winHttp.message}`;
+      else if (winHttp.message) winHttpSync = ` WinHTTP 同步失败：${winHttp.message}`;
+      systemProxyMessage = isEmbedded
+        ? `${r.message} 内嵌网页模式：公网 HTTP(S) 走 mitm（内网与本机直连${
+            pacList.length ? `；额外直连：${pacList.join(", ")}` : ""
+          }）。请先开始抓包再启动目标应用。${winHttpSync}`
+        : `${r.message} 已路由域名：${pacList.join(", ")}。未在此列表中的站点不会进流量列表。${winHttpSync}`;
       if (!r.ok) {
         mitmChild.kill();
         mitmState = null;
@@ -569,7 +630,10 @@ export async function startMitm(options: {
 }
 
 export function isDesktopTestIngestUrl(url: string): boolean {
-  return url.includes("httpbin.org") && url.includes("from=atp-desktop");
+  const u = url.toLowerCase();
+  if (u.includes("httpbin.org") && u.includes("from=atp-desktop")) return true;
+  if (/^https:\/\/www\.baidu\.com\/?$/i.test(u.trim())) return true;
+  return false;
 }
 
 export async function countMitmIngestedTransactions(
@@ -586,7 +650,7 @@ export async function quickCaptureStart(options: {
   hostFilter?: string;
   sessionId?: string;
   setSystemProxy?: boolean;
-  proxyMode?: "pac" | "global";
+  proxyMode?: "pac" | "global" | "embedded";
 }): Promise<{
   ok: boolean;
   sessionId?: string;

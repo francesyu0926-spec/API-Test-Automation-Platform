@@ -35,8 +35,14 @@ export type HttpSendPayload = {
 };
 
 export type HttpBenchmarkOptions = {
-  total: number;
+  /** 总样本数；若设置 loops 则由 threads × loops 计算 */
+  total?: number;
+  /** 线程数（并发用户），对应 JMeter Number of Threads */
   concurrency: number;
+  /** 每线程循环次数（JMeter Loop Count） */
+  loops?: number;
+  /** 拉起全部线程的秒数（JMeter Ramp-Up） */
+  rampUpSec?: number;
   warmup?: number;
   timeoutMs?: number;
 };
@@ -89,6 +95,9 @@ export type HttpSendResult = {
   headers: Record<string, string>;
   bodyText: string;
   bodySize: number;
+  /** 图片等二进制预览（data URL 用） */
+  bodyBase64?: string;
+  bodyMime?: string;
   error?: string;
 };
 

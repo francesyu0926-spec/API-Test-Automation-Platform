@@ -35,6 +35,10 @@ function slugCaseName(raw: string): string {
   return s.slice(0, 48) || "captured-case";
 }
 
+export function suggestedCaseNameFromUrl(url: string): string {
+  return caseNameFromUrl(url);
+}
+
 function caseNameFromUrl(url: string): string {
   try {
     const u = new URL(url);

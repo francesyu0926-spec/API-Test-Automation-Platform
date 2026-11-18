@@ -2,26 +2,27 @@ import type { WorkbenchDraft } from "../../shared/apiWorkbenchTypes";
 import { applyDefinedVariablesToDraft, substituteVars } from "../../shared/vars";
 import { buildUrl, headersForSend, rowsToRecord } from "./apiWorkbenchModel";
 import type { HttpSendPayload } from "../../shared/apiWorkbenchTypes";
+import { mergeAuthFromSampler } from "./samplerAuth";
 
 export function resolveWorkbenchPayload(
   draft: WorkbenchDraft,
   variables: Record<string, string>,
 ): HttpSendPayload {
+  const env = mergeAuthFromSampler(variables, draft);
   const method = draft.method.toUpperCase();
-  const merged = applyDefinedVariablesToDraft(draft, variables);
+  const merged = applyDefinedVariablesToDraft(draft, env);
   const resolved: WorkbenchDraft = {
     ...merged,
-    url: substituteVars(merged.url, variables),
+    url: substituteVars(merged.url, env),
     query: merged.query.map((r) => ({
       ...r,
-      value: r.enabled && r.value ? substituteVars(r.value, variables) : r.value,
+      value: r.enabled && r.value ? substituteVars(r.value, env) : r.value,
     })),
     headers: merged.headers.map((h) => ({
       ...h,
-      value: h.enabled && h.value ? substituteVars(h.value, variables) : h.value,
+      value: h.enabled && h.value ? substituteVars(h.value, env) : h.value,
     })),
-    body:
-      merged.bodyMode === "raw" && merged.body ? substituteVars(merged.body, variables) : merged.body,
+    body: merged.bodyMode === "raw" && merged.body ? substituteVars(merged.body, env) : merged.body,
   };
   const url = buildUrl(resolved.url, resolved.query);
   const headers = headersForSend(resolved);
@@ -35,17 +36,18 @@ export function resolveWorkbenchWsConnect(
   draft: WorkbenchDraft,
   variables: Record<string, string>,
 ): { url: string; headers: Record<string, string> } {
-  const merged = applyDefinedVariablesToDraft(draft, variables);
+  const env = mergeAuthFromSampler(variables, draft);
+  const merged = applyDefinedVariablesToDraft(draft, env);
   const resolved: WorkbenchDraft = {
     ...merged,
-    url: substituteVars(merged.url, variables),
+    url: substituteVars(merged.url, env),
     query: merged.query.map((r) => ({
       ...r,
-      value: r.enabled && r.value ? substituteVars(r.value, variables) : r.value,
+      value: r.enabled && r.value ? substituteVars(r.value, env) : r.value,
     })),
     headers: merged.headers.map((h) => ({
       ...h,
-      value: h.enabled && h.value ? substituteVars(h.value, variables) : h.value,
+      value: h.enabled && h.value ? substituteVars(h.value, env) : h.value,
     })),
   };
   const url = buildUrl(resolved.url, resolved.query);

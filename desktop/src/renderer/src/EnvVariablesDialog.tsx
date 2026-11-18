@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import LoadingOverlay from "./LoadingOverlay";
 import { emptyRow } from "./apiWorkbenchModel";
 import type { KeyValueRow } from "../../shared/apiWorkbenchTypes";
+import { templateVarNamesInDraft } from "../../shared/vars";
 
 type Props = {
   open: boolean;
@@ -78,7 +79,7 @@ export default function EnvVariablesDialog({
           环境变量 · {envName}
         </h4>
         <p className="modal-message" style={{ marginBottom: 12 }}>
-          保存至 <code>environments/{envName}.local.yaml</code>（不提交 Git）。值可为空；Send 时会用已保存的值替换 {"{{变量}}"}，未配置项会提示。
+          保存至 <code>environments/{envName}.local.yaml</code>（不提交 Git，本项目所有用例与工作台 Send 共用）。填写后点「保存并应用」，无需在用例 YAML 里再写 token/secret。
         </p>
         <div className="workbench-kv loading-host" style={{ maxHeight: 280, minHeight: 120 }}>
           <LoadingOverlay show={loading} label="加载变量…" />
@@ -108,7 +109,7 @@ export default function EnvVariablesDialog({
                       className="text-input workbench-kv-input"
                       type={row.key === "token" ? "password" : "text"}
                       value={row.value}
-                      placeholder={row.key === "token" ? "JWT" : row.key === "base_url" ? "https://terminal.sfccn.com" : ""}
+                      placeholder={row.key === "token" ? "JWT" : row.key === "base_url" ? "https://api.example.com" : ""}
                       onChange={(e) =>
                         setRows((list) =>
                           list.map((r, j) => (j === i ? { ...r, value: e.target.value } : r)),
@@ -148,13 +149,5 @@ export function collectTemplateVarNames(draft: {
   headers: { value: string }[];
   body: string;
 }): string[] {
-  const blobs = [draft.url, draft.body, ...draft.query.map((q) => q.value), ...draft.headers.map((h) => h.value)];
-  const keys = new Set<string>();
-  for (const text of blobs) {
-    const re = /\{\{(\w+)\}\}/g;
-    for (const m of text.matchAll(re)) {
-      if (m[1]) keys.add(m[1]);
-    }
-  }
-  return [...keys];
+  return templateVarNamesInDraft(draft);
 }

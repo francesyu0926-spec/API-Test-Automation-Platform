@@ -1,14 +1,38 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
+type CaptureProxyMode = "pac" | "global" | "embedded";
+
 import ConfirmDialog from "./ConfirmDialog";
 import CaptureSessionsDialog from "./CaptureSessionsDialog";
 import LoadingOverlay from "./LoadingOverlay";
+import BatchSaveCasesDialog from "./BatchSaveCasesDialog";
 import SaveCaseDialog from "./SaveCaseDialog";
+import { originFromUrl } from "./ProjectTargetField";
+import { persistCaseAuthFromCapture } from "./samplerAuth";
+
+const CAPTURE_CASE_ENV = "dev";
 import { captureTxToDraft } from "./apiWorkbenchModel";
+import { buildBatchCaseRows } from "./captureBatchCases";
 import { captureTxToCaseMeta, captureTxToCaseYaml } from "./caseYaml";
 import { transactionToCurl } from "./captureCurl";
-import { filterTransactions } from "./captureFilters";
+import { filterTransactions, isCaptureSelfTestRow } from "./captureFilters";
+import {
+  asCaptureTransaction,
+  captureBodyImageSrc,
+  estimateBodyBytes,
+  formatCaptureBodyText,
+  headerEntries,
+  pickContentType,
+  responseStatusTone,
+  sniffImageMime,
+} from "./captureTransactionView";
+import { httpStatusTone } from "./apiWorkbenchModel";
 import type { WorkbenchDraft } from "../../shared/apiWorkbenchTypes";
+
+const PAC_HOSTS_STORAGE = "atp-capture-pac-hosts";
+const PAC_HOSTS_PLACEHOLDER = "api.example.com,api.yourcorp.com";
+
+type CaptureDetailTab = "response" | "request" | "curl" | "yaml" | "raw";
 
 type PendingConfirm = {
   title: string;
@@ -23,18 +47,42 @@ type TxRow = Awaited<ReturnType<typeof window.atp.getCaptureIndex>>["transaction
 
 const TX_PAGE_SIZE = 10;
 
+/** ISO 时间字符串：新 → 旧 */
+function compareCapturedAtDesc(a: TxRow, b: TxRow): number {
+  const ta = a.captured_at || "";
+  const tb = b.captured_at || "";
+  if (tb !== ta) return tb.localeCompare(ta);
+  return b.id.localeCompare(a.id);
+}
+
 type Props = {
-  projects: { id: string; name: string }[];
   project: string;
-  onProject: (id: string) => void;
+  projectName: string;
   onOpenInWorkbench?: (draft: WorkbenchDraft) => void;
   onCaseSaved?: () => void;
+  onGoToProjects?: () => void;
 };
 
-export default function CapturePanel({ projects, project, onProject, onOpenInWorkbench, onCaseSaved }: Props) {
+export default function CapturePanel({
+  project,
+  projectName,
+  onOpenInWorkbench,
+  onCaseSaved,
+  onGoToProjects,
+}: Props) {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [selectedSession, setSelectedSession] = useState<string>("");
   const [label, setLabel] = useState("");
+  const [proxyMode, setProxyMode] = useState<CaptureProxyMode>("pac");
+  const [pacHosts, setPacHosts] = useState(() => {
+    try {
+      const saved = localStorage.getItem(PAC_HOSTS_STORAGE);
+      if (saved?.trim()) return saved;
+    } catch {
+      /* ignore */
+    }
+    return "";
+  });
   const [ingest, setIngest] = useState<Awaited<ReturnType<typeof window.atp.getIngestStatus>>>({
     running: false,
   });
@@ -47,6 +95,7 @@ export default function CapturePanel({ projects, project, onProject, onOpenInWor
   const [detailToast, setDetailToast] = useState("");
   const [pendingConfirm, setPendingConfirm] = useState<PendingConfirm | null>(null);
   const [pendingCaseOverwrite, setPendingCaseOverwrite] = useState<{
+    projectId: string;
     caseName: string;
     addToSuite: boolean;
     suiteName: string;
@@ -65,7 +114,23 @@ export default function CapturePanel({ projects, project, onProject, onOpenInWor
   const [sessionsDeleteOpen, setSessionsDeleteOpen] = useState(false);
   const [trafficLoading, setTrafficLoading] = useState(false);
   const [txDetailLoading, setTxDetailLoading] = useState(false);
+  const [checkedTxIds, setCheckedTxIds] = useState<Set<string>>(() => new Set());
+  const [batchSaveOpen, setBatchSaveOpen] = useState(false);
+  const [batchSaving, setBatchSaving] = useState(false);
+  const [detailTab, setDetailTab] = useState<CaptureDetailTab>("response");
+  useEffect(() => {
+    try {
+      localStorage.setItem(PAC_HOSTS_STORAGE, pacHosts);
+    } catch {
+      /* ignore */
+    }
+  }, [pacHosts]);
+
   const capturing = ingest.running || mitm.running;
+  const businessTxCount = useMemo(
+    () => transactions.filter((t) => !isCaptureSelfTestRow(t)).length,
+    [transactions],
+  );
   const lockedCaptureSessionId =
     ingest.running && ingest.sessionId && ingest.project === project ? ingest.sessionId : null;
   const activeSessionId =
@@ -87,7 +152,7 @@ export default function CapturePanel({ projects, project, onProject, onOpenInWor
             return apiRows;
           })()
         : transactions;
-    return source;
+    return [...source].sort(compareCapturedAtDesc);
   }, [transactions, apiOnlyFilter, trafficSearch]);
 
   const apiMatchCount = useMemo(
@@ -99,6 +164,112 @@ export default function CapturePanel({ projects, project, onProject, onOpenInWor
     !trafficSearch.trim() &&
     transactions.length > 0 &&
     apiMatchCount === 0;
+
+  useEffect(() => {
+    setCheckedTxIds(new Set());
+  }, [activeSessionId, project]);
+
+  const pagedTransactions = useMemo(() => {
+    const start = (txPage - 1) * TX_PAGE_SIZE;
+    return visibleTransactions.slice(start, start + TX_PAGE_SIZE);
+  }, [visibleTransactions, txPage]);
+
+  const txPageCount = Math.max(1, Math.ceil(visibleTransactions.length / TX_PAGE_SIZE) || 1);
+
+  const selectedCount = checkedTxIds.size;
+  const pageIds = useMemo(() => pagedTransactions.map((t) => t.id), [pagedTransactions]);
+  const allPageChecked = pageIds.length > 0 && pageIds.every((id) => checkedTxIds.has(id));
+  const toggleTxChecked = (txId: string) => {
+    setCheckedTxIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(txId)) next.delete(txId);
+      else next.add(txId);
+      return next;
+    });
+  };
+
+  const togglePageSelection = () => {
+    setCheckedTxIds((prev) => {
+      const next = new Set(prev);
+      if (allPageChecked) {
+        for (const id of pageIds) next.delete(id);
+      } else {
+        for (const id of pageIds) next.add(id);
+      }
+      return next;
+    });
+  };
+
+  const clearTxSelection = () => setCheckedTxIds(new Set());
+
+  const selectAllVisible = () => {
+    setCheckedTxIds(new Set(visibleTransactions.map((t) => t.id)));
+  };
+
+  const batchCaseRows = useMemo(
+    () =>
+      buildBatchCaseRows(visibleTransactions.filter((t) => checkedTxIds.has(t.id))),
+    [visibleTransactions, checkedTxIds],
+  );
+
+  const runBatchSave = async (opts: {
+    projectId: string;
+    items: ReturnType<typeof buildBatchCaseRows>;
+    addToSuite: boolean;
+    suiteName: string;
+    overwriteExisting: boolean;
+    openProjects: boolean;
+  }) => {
+    const sid = activeSessionId;
+    const captureProject = project;
+    if (!captureProject || !sid || !opts.projectId) return;
+    setBatchSaving(true);
+    let saved = 0;
+    let skipped = 0;
+    let failed = 0;
+    try {
+      for (const item of opts.items) {
+        const caseName = item.caseName.trim();
+        if (!caseName) {
+          failed += 1;
+          continue;
+        }
+        const exists = await window.atp.projectCaseExists(opts.projectId, caseName);
+        if (exists && !opts.overwriteExisting) {
+          skipped += 1;
+          continue;
+        }
+        const tx = await window.atp.getCaptureTransaction(captureProject, sid, item.txId);
+        if (!tx) {
+          failed += 1;
+          continue;
+        }
+        const yaml = captureTxToCaseYaml(tx);
+        await persistCaseAuthFromCapture(opts.projectId, CAPTURE_CASE_ENV, tx);
+        const res = await window.atp.saveProjectCase(opts.projectId, caseName, yaml, {
+          addToSuite: opts.addToSuite ? opts.suiteName : undefined,
+          overwrite: opts.overwriteExisting,
+        });
+        if (res.ok) saved += 1;
+        else if (res.exists && !opts.overwriteExisting) skipped += 1;
+        else failed += 1;
+      }
+    } finally {
+      setBatchSaving(false);
+      setBatchSaveOpen(false);
+      clearTxSelection();
+    }
+    const parts = [
+      saved ? `已保存 ${saved} 个` : "",
+      skipped ? `跳过 ${skipped} 个已存在` : "",
+      failed ? `失败 ${failed} 个` : "",
+    ].filter(Boolean);
+    showDetailToast(parts.length ? parts.join("，") : "未保存任何用例");
+    if (saved > 0) {
+      onCaseSaved?.();
+      if (opts.openProjects) onGoToProjects?.();
+    }
+  };
 
   const emptyListState = useMemo(() => {
     if (visibleTransactions.length > 0) return null;
@@ -139,12 +310,6 @@ export default function CapturePanel({ projects, project, onProject, onOpenInWor
     activeSessionId,
   ]);
 
-  const txPageCount = Math.max(1, Math.ceil(visibleTransactions.length / TX_PAGE_SIZE) || 1);
-  const pagedTransactions = useMemo(() => {
-    const start = (txPage - 1) * TX_PAGE_SIZE;
-    return visibleTransactions.slice(start, start + TX_PAGE_SIZE);
-  }, [visibleTransactions, txPage]);
-
   const refreshSessions = useCallback(async () => {
     if (!project) return;
     const list = await window.atp.listCaptureSessions(project);
@@ -165,7 +330,7 @@ export default function CapturePanel({ projects, project, onProject, onOpenInWor
 
   const refreshIndex = useCallback(
     async (opts?: { silent?: boolean }) => {
-      const sid = ingest.running && ingest.sessionId ? ingest.sessionId : selectedSession;
+      const sid = activeSessionId;
       if (!project || !sid) {
         setTransactions([]);
         return;
@@ -173,12 +338,15 @@ export default function CapturePanel({ projects, project, onProject, onOpenInWor
       if (!opts?.silent) setTrafficLoading(true);
       try {
         const { transactions: txs } = await window.atp.getCaptureIndex(project, sid);
-        setTransactions(txs);
+        setTransactions(Array.isArray(txs) ? txs : []);
+      } catch (err) {
+        console.error("getCaptureIndex failed", err);
+        if (!opts?.silent) setMessage("加载流量列表失败，请停止抓包后重试");
       } finally {
         if (!opts?.silent) setTrafficLoading(false);
       }
     },
-    [project, selectedSession, ingest.running, ingest.sessionId],
+    [project, activeSessionId],
   );
 
   useEffect(() => {
@@ -195,16 +363,20 @@ export default function CapturePanel({ projects, project, onProject, onOpenInWor
 
   useEffect(() => {
     const tick = async () => {
-      const st = await window.atp.getIngestStatus();
-      setIngest(st);
-      setMitm(await window.atp.mitmStatus());
-      setSysProxy(await window.atp.systemProxyStatus());
-      if (st.running || selectedSession) await refreshIndex({ silent: true });
+      try {
+        const st = await window.atp.getIngestStatus();
+        setIngest(st);
+        setMitm(await window.atp.mitmStatus());
+        setSysProxy(await window.atp.systemProxyStatus());
+        if (st.running || activeSessionId) await refreshIndex({ silent: true });
+      } catch (err) {
+        console.error("capture status tick failed", err);
+      }
     };
     void tick();
     const id = setInterval(() => void tick(), 2000);
     return () => clearInterval(id);
-  }, [selectedSession, refreshIndex, ingest.sessionId]);
+  }, [activeSessionId, refreshIndex]);
 
   useEffect(() => {
     if (ingest.running && ingest.sessionId && ingest.sessionId !== selectedSession) {
@@ -222,6 +394,10 @@ export default function CapturePanel({ projects, project, onProject, onOpenInWor
 
   const onStart = async () => {
     if (!project) return;
+    if (proxyMode === "pac" && !pacHosts.trim()) {
+      setMessage("PAC 模式下请填写要快照的 API 域名（逗号分隔）");
+      return;
+    }
     if (!mitmAvail) {
       setMessage("未安装 mitmproxy，请在仓库根目录 pip install -r requirements-capture.txt");
       return;
@@ -231,10 +407,10 @@ export default function CapturePanel({ projects, project, onProject, onOpenInWor
     const res = await window.atp.quickCaptureStart({
       project,
       label,
-      hostFilter: "",
+      hostFilter: proxyMode === "pac" || proxyMode === "embedded" ? pacHosts.trim() : "",
       sessionId: undefined,
       setSystemProxy: true,
-      proxyMode: "global",
+      proxyMode,
     });
     setBusy(false);
     if (!res.ok) {
@@ -280,6 +456,7 @@ export default function CapturePanel({ projects, project, onProject, onOpenInWor
     try {
       const tx = await window.atp.getCaptureTransaction(project, sid, txId);
       setSelectedTx(tx);
+      setDetailTab("response");
       setDraftYaml(tx ? captureTxToCaseYaml(tx) : "");
       setDraftCurl(tx ? transactionToCurl(tx) : "");
     } finally {
@@ -303,6 +480,26 @@ export default function CapturePanel({ projects, project, onProject, onOpenInWor
         showDetailToast("已复制 cURL 到剪贴板");
       } catch {
         showDetailToast("复制失败，请手动选中下方 cURL 文本");
+      }
+    }
+  };
+
+  const copyResponseBody = async () => {
+    const parsed = asCaptureTransaction(selectedTx);
+    const text = formatCaptureBodyText(parsed?.response?.body);
+    if (!text || text === "(无响应体)") {
+      showDetailToast("无响应体可复制");
+      return;
+    }
+    try {
+      await window.atp.copyText(text);
+      showDetailToast("已复制响应 Body");
+    } catch {
+      try {
+        await navigator.clipboard.writeText(text);
+        showDetailToast("已复制响应 Body");
+      } catch {
+        showDetailToast("复制失败");
       }
     }
   };
@@ -378,22 +575,16 @@ export default function CapturePanel({ projects, project, onProject, onOpenInWor
 
   return (
     <>
-      <h2 className="page-head">抓包</h2>
+      <div className="module-head-row capture-module-head">
+        <h2 className="page-head">抓包</h2>
+        <span className="module-context-chip" title={`项目 ID：${project}`}>
+          {projectName || project}
+        </span>
+      </div>
 
       <section className="card">
         <h3 className="card-title">控制</h3>
-        <div className="toolbar">
-          <select value={project || ""} disabled={!projects.length} onChange={(e) => onProject(e.target.value)}>
-            {!projects.length ? (
-              <option value="">暂无项目 — 请先到「项目与用例」新建</option>
-            ) : (
-              projects.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name}
-                </option>
-              ))
-            )}
-          </select>
+        <div className="toolbar capture-control-toolbar">
           <input
             className="text-input"
             style={{ flex: 1, maxWidth: 220 }}
@@ -402,6 +593,18 @@ export default function CapturePanel({ projects, project, onProject, onOpenInWor
             disabled={capturing}
             onChange={(e) => setLabel(e.target.value)}
           />
+          <select
+            className="text-input capture-proxy-mode"
+            value={proxyMode}
+            disabled={capturing}
+            title="PAC 仅代理填写的 API 域名，其它流量直连"
+            onChange={(e) => setProxyMode(e.target.value as CaptureProxyMode)}
+            aria-label="代理模式"
+          >
+            <option value="pac">PAC（按域名）</option>
+            <option value="embedded">内嵌网页（广域 PAC）</option>
+            <option value="global">全局代理</option>
+          </select>
           {!capturing ? (
             <button type="button" className="nav-btn" disabled={busy} onClick={() => void onInstallCa()}>
               安装证书
@@ -443,22 +646,105 @@ export default function CapturePanel({ projects, project, onProject, onOpenInWor
           )}
         </div>
 
-        {proxyStale && (
+        {(proxyStale || (capturing && proxyMode === "global")) && (
           <p className="hint warn">
-            系统代理仍开着但抓包未运行，Chrome 可能无法打开网页（ERR_PROXY_CONNECTION_FAILED）。点「仅恢复上网」后刷新浏览器。
+            {proxyStale
+              ? "系统代理仍开着但抓包未运行。部分桌面客户端可能一直显示 Connecting——请先点「仅恢复上网」，再完全退出客户端后重开。"
+              : "全局代理下部分桌面客户端首页易白屏/Connecting。建议停止后改用 PAC 或内嵌网页模式。"}
           </p>
         )}
+        <div className="capture-recovery-row">
+          <button
+            type="button"
+            className={`nav-btn${proxyStale ? " capture-recovery-btn--urgent" : ""}`}
+            disabled={busy}
+            onClick={() => void onRestoreNetwork()}
+          >
+            仅恢复上网（白屏 / Connecting 时点此项）
+          </button>
+        </div>
 
         {message && <p className="hint">{message}</p>}
 
         {!capturing && (
-          <p className="hint">首次：安装证书 → 开始抓包 → Chrome 访问站点。用完点「停止并恢复上网」。</p>
+          <p className="hint">
+            首次：安装证书 → 选 <strong>PAC</strong> 并填写 API 域名（逗号分隔）→ 开始抓包。桌面客户端慎用「全局代理」，否则可能出现<strong>白屏/Connecting</strong>。
+          </p>
+        )}
+        {(proxyMode === "pac" || proxyMode === "embedded") && !capturing && (
+          <div className="capture-pac-hosts">
+            <span className="capture-pac-hosts-label">
+              {proxyMode === "embedded"
+                ? "可选直连域名（内嵌网页模式下不走 mitm，用于壳层/静态资源）"
+                : "PAC 域名（仅这些主机走 mitm，逗号分隔）"}
+            </span>
+            <div className="capture-pac-hosts-row">
+              <input
+                className="text-input capture-pac-hosts-input"
+                placeholder={
+                  proxyMode === "embedded"
+                    ? "留空=除内网外公网 HTTPS 均走 mitm；例：cdn.example.com"
+                    : PAC_HOSTS_PLACEHOLDER
+                }
+                value={pacHosts}
+                disabled={capturing}
+                onChange={(e) => setPacHosts(e.target.value)}
+              />
+              {proxyMode === "embedded" ? (
+                <button
+                  type="button"
+                  className="nav-btn nav-btn--compact"
+                  disabled={capturing}
+                  onClick={() => setPacHosts("")}
+                >
+                  清空直连
+                </button>
+              ) : null}
+            </div>
+          </div>
+        )}
+        {proxyMode === "embedded" && !capturing && (
+          <p className="hint capture-proxy-hint">
+            <strong>内嵌网页：</strong>先点「开始抓包」→ 再启动目标应用 → 打开内嵌 H5/WebView 页面。广域 PAC 会将公网
+            HTTP(S) 经 mitm（内网与本机直连）。
+          </p>
+        )}
+        {capturing && (proxyMode === "pac" || proxyMode === "embedded") && (
+          <p className="hint capture-proxy-hint">
+            ① 已安装 MITM 证书 ② 抓包开始后<strong>完全退出</strong>目标应用再打开 ③ 在应用内触发请求。若仍无记录：试「内嵌网页」模式、关「仅
+            API」或按域名搜索。SSL Pinning 无法 mitm。
+          </p>
+        )}
+        {capturing && businessTxCount === 0 && (
+          <p className="hint warn">
+            尚无业务流量（仅自检或无请求经过 mitm）。请确认 PAC 含实际 API 主机、证书已装，并已重启目标应用后再次操作。
+          </p>
         )}
         {capturing && (
           <p className="hint">
-            浏览器：Chrome 访问即可（需先<strong>安装证书</strong>并重开浏览器）。课程/H5 页（如小鹅通）接口常在{" "}
-            <code>*.xeknow.com</code> 等<strong>第三方域名</strong>：流量列表可关闭「仅 API」或搜索{" "}
-            <code>xeknow</code> / <code>shanxiguandian</code>。南财等桌面终端须完全退出后重启。
+            {proxyMode === "global" ? (
+              <>
+                当前为<strong>全局代理</strong>：若客户端白屏，请点「停止」后改用 <strong>内嵌网页</strong> 或 <strong>PAC</strong>。
+              </>
+            ) : proxyMode === "embedded" ? (
+              <>
+                当前为<strong>内嵌网页广域 PAC</strong>
+                {pacHosts.trim() ? (
+                  <>
+                    ，直连：<code className="capture-pac-inline">{pacHosts}</code>
+                  </>
+                ) : (
+                  <>（公网 HTTP(S) 均经 mitm）</>
+                )}
+              </>
+            ) : (
+              <>
+                当前 PAC 路由：
+                <code className="capture-pac-inline">{pacHosts.trim() || "（未配置）"}</code>
+              </>
+            )}
+            {" "}
+            浏览器抓包需先安装证书；可关「仅 API」或搜索域名过滤。
           </p>
         )}
       </section>
@@ -534,30 +820,85 @@ export default function CapturePanel({ projects, project, onProject, onOpenInWor
           >
             删除会话…
           </button>
+          {selectedCount > 0 ? (
+            <>
+              <span className="capture-selection-meta">已选 {selectedCount} 条</span>
+              <button type="button" className="nav-btn" onClick={selectAllVisible}>
+                全选当前列表
+              </button>
+              <button type="button" className="nav-btn" onClick={clearTxSelection}>
+                取消选择
+              </button>
+              <button
+                type="button"
+                className="primary"
+                disabled={busy || batchSaving || !activeSessionId}
+                onClick={() => setBatchSaveOpen(true)}
+              >
+                保存到项目用例
+              </button>
+            </>
+          ) : (
+            <span className="hint capture-select-hint">勾选多条流量可批量保存为用例</span>
+          )}
         </div>
         <div className="loading-host capture-traffic-table-host">
           <LoadingOverlay show={trafficLoading} label="加载流量…" />
           <table>
             <thead>
               <tr>
+                <th className="capture-tx-check-col">
+                  <input
+                    type="checkbox"
+                    aria-label="全选本页"
+                    checked={allPageChecked}
+                    disabled={!pageIds.length}
+                    onChange={togglePageSelection}
+                  />
+                </th>
                 <th>时间</th>
                 <th>方法</th>
+                <th>状态</th>
                 <th>Path</th>
                 <th>URL</th>
               </tr>
             </thead>
             <tbody>
-            {pagedTransactions.map((t) => (
-              <tr key={t.id} className="clickable" onClick={() => void openTx(t.id)}>
+            {pagedTransactions.map((t) => {
+              const checked = checkedTxIds.has(t.id);
+              return (
+              <tr
+                key={t.id}
+                className={`clickable${checked ? " capture-tx-row--checked" : ""}`}
+                onClick={() => void openTx(t.id)}
+              >
+                <td className="capture-tx-check-col" onClick={(e) => e.stopPropagation()}>
+                  <input
+                    type="checkbox"
+                    aria-label={`选择 ${t.method} ${t.path}`}
+                    checked={checked}
+                    onChange={() => toggleTxChecked(t.id)}
+                  />
+                </td>
                 <td>{t.captured_at}</td>
                 <td>{t.method}</td>
+                <td>
+                  {t.status ? (
+                    <span className={`capture-status-pill capture-status-pill--${responseStatusTone(t.status)}`}>
+                      {t.status}
+                    </span>
+                  ) : (
+                    <span className="hint">—</span>
+                  )}
+                </td>
                 <td>{t.path}</td>
                 <td className="url-cell">{t.url}</td>
               </tr>
-            ))}
+            );
+            })}
             {!visibleTransactions.length && emptyListState && (
               <tr className="capture-empty-row">
-                <td colSpan={4}>
+                <td colSpan={6}>
                   <div className="capture-empty-state">
                     <div className="capture-empty-icon" aria-hidden>
                       ∅
@@ -617,36 +958,20 @@ export default function CapturePanel({ projects, project, onProject, onOpenInWor
       {selectedTx && (
         <section className="card loading-host">
           <LoadingOverlay show={txDetailLoading} label="加载明细…" />
-          <div className="toolbar" style={{ marginBottom: 8 }}>
-            <h3 className="card-title" style={{ margin: 0, flex: 1 }}>
-              交易明细
-            </h3>
-            <button type="button" className="nav-btn" onClick={() => void copyCurl()}>
-              复制 cURL
-            </button>
-            <button type="button" className="nav-btn" onClick={() => downloadCurl()}>
-              下载脚本
-            </button>
-            {onOpenInWorkbench && selectedTx && (
-              <button
-                type="button"
-                className="primary"
-                onClick={() => onOpenInWorkbench(captureTxToDraft(selectedTx))}
-              >
-                在工作台打开
-              </button>
-            )}
-            {selectedTx && (
-              <button type="button" className="nav-btn" onClick={() => setSaveCaseOpen(true)}>
-                保存为用例
-              </button>
-            )}
-          </div>
-          <pre className="curl-block">{draftCurl}</pre>
-          <div className="grid-2" style={{ marginTop: 12 }}>
-            <pre>{JSON.stringify(selectedTx, null, 2)}</pre>
-            <DraftYaml draft={draftYaml} />
-          </div>
+          <CaptureTxDetail
+            tx={selectedTx}
+            detailTab={detailTab}
+            onTabChange={setDetailTab}
+            draftCurl={draftCurl}
+            draftYaml={draftYaml}
+            onCopyCurl={() => void copyCurl()}
+            onDownloadCurl={downloadCurl}
+            onCopyResponseBody={() => void copyResponseBody()}
+            onOpenInWorkbench={
+              onOpenInWorkbench ? () => onOpenInWorkbench(captureTxToDraft(selectedTx)) : undefined
+            }
+            onSaveCase={() => setSaveCaseOpen(true)}
+          />
         </section>
       )}
 
@@ -663,19 +988,28 @@ export default function CapturePanel({ projects, project, onProject, onOpenInWor
 
       <SaveCaseDialog
         open={saveCaseOpen && !!selectedTx}
+        defaultProjectId={project || undefined}
+        suggestedBaseUrl={
+          selectedTx && typeof selectedTx === "object" && selectedTx !== null && "request" in selectedTx
+            ? originFromUrl(
+                String((selectedTx as { request?: { url?: string } }).request?.url ?? ""),
+              )
+            : undefined
+        }
         defaultName={selectedTx ? captureTxToCaseMeta(selectedTx).defaultName : "captured-case"}
         yamlPreview={draftYaml}
         onCancel={() => setSaveCaseOpen(false)}
-        onConfirm={({ caseName, addToSuite, suiteName }) => {
+        onConfirm={({ projectId, caseName, addToSuite, suiteName }) => {
           void (async () => {
-            if (!project || !draftYaml) return;
-            const exists = await window.atp.projectCaseExists(project, caseName);
+            if (!projectId || !draftYaml) return;
+            if (selectedTx) await persistCaseAuthFromCapture(projectId, CAPTURE_CASE_ENV, selectedTx);
+            const exists = await window.atp.projectCaseExists(projectId, caseName);
             setSaveCaseOpen(false);
             if (exists) {
-              setPendingCaseOverwrite({ caseName, addToSuite, suiteName, yaml: draftYaml });
+              setPendingCaseOverwrite({ projectId, caseName, addToSuite, suiteName, yaml: draftYaml });
               return;
             }
-            const res = await window.atp.saveProjectCase(project, caseName, draftYaml, {
+            const res = await window.atp.saveProjectCase(projectId, caseName, draftYaml, {
               addToSuite: addToSuite ? suiteName : undefined,
             });
             if (!res.ok) {
@@ -698,9 +1032,10 @@ export default function CapturePanel({ projects, project, onProject, onOpenInWor
         onConfirm={() => {
           const pending = pendingCaseOverwrite;
           setPendingCaseOverwrite(null);
-          if (!pending || !project) return;
+          if (!pending?.projectId) return;
           void (async () => {
-            const res = await window.atp.saveProjectCase(project, pending.caseName, pending.yaml, {
+            if (selectedTx) await persistCaseAuthFromCapture(pending.projectId, CAPTURE_CASE_ENV, selectedTx);
+            const res = await window.atp.saveProjectCase(pending.projectId, pending.caseName, pending.yaml, {
               addToSuite: pending.addToSuite ? pending.suiteName : undefined,
               overwrite: true,
             });
@@ -739,7 +1074,256 @@ export default function CapturePanel({ projects, project, onProject, onOpenInWor
         onCancel={() => setSessionsDeleteOpen(false)}
         onConfirm={(ids) => void runDeleteSessions(ids)}
       />
+
+      <BatchSaveCasesDialog
+        open={batchSaveOpen}
+        rows={batchCaseRows}
+        saving={batchSaving}
+        defaultProjectId={project || undefined}
+        onCancel={() => !batchSaving && setBatchSaveOpen(false)}
+        onConfirm={(opts) => void runBatchSave(opts)}
+      />
     </>
+  );
+}
+
+function CaptureTxDetail({
+  tx,
+  detailTab,
+  onTabChange,
+  draftCurl,
+  draftYaml,
+  onCopyCurl,
+  onDownloadCurl,
+  onCopyResponseBody,
+  onOpenInWorkbench,
+  onSaveCase,
+}: {
+  tx: unknown;
+  detailTab: CaptureDetailTab;
+  onTabChange: (tab: CaptureDetailTab) => void;
+  draftCurl: string;
+  draftYaml: string;
+  onCopyCurl: () => void;
+  onDownloadCurl: () => void;
+  onCopyResponseBody: () => void;
+  onOpenInWorkbench?: () => void;
+  onSaveCase: () => void;
+}) {
+  const parsed = asCaptureTransaction(tx);
+  const resp = parsed?.response;
+  const status = resp?.status ?? 0;
+  const durationMs = resp?.duration_ms;
+  const ws = parsed?.websocket;
+  const respCt = pickContentType(resp?.headers);
+  const respBytes = estimateBodyBytes(ws?.body ?? resp?.body);
+  const [payloadView, setPayloadView] = useState<"body" | "headers">("body");
+
+  useEffect(() => {
+    setPayloadView("body");
+  }, [parsed?.id]);
+
+  const tabs: Array<{ id: CaptureDetailTab; label: string }> = [
+    { id: "response", label: "响应" },
+    { id: "request", label: "请求" },
+    { id: "curl", label: "cURL" },
+    { id: "yaml", label: "用例 YAML" },
+    { id: "raw", label: "完整 JSON" },
+  ];
+
+  return (
+    <div className="capture-detail-card">
+      <div className="capture-detail-toolbar">
+        <div className="capture-detail-head">
+          <h3 className="capture-detail-title">交易明细</h3>
+          <div className="capture-meta-chips">
+            {status > 0 ? (
+              <>
+                <span
+                  className={`capture-meta-chip capture-meta-chip--${httpStatusTone(status, status >= 200 && status < 300)}`}
+                >
+                  HTTP {status}
+                </span>
+                {durationMs != null ? (
+                  <span className="capture-meta-chip capture-meta-chip--muted">耗时 {Math.round(durationMs)} ms</span>
+                ) : null}
+                {respCt ? <span className="capture-meta-chip capture-meta-chip--muted">{respCt}</span> : null}
+                {respBytes != null && detailTab === "response" ? (
+                  <span className="capture-meta-chip capture-meta-chip--muted">{respBytes} B</span>
+                ) : null}
+              </>
+            ) : (
+              <span className="hint">未记录响应</span>
+            )}
+          </div>
+        </div>
+        <div className="capture-detail-actions">
+          {detailTab === "response" ? (
+            <button type="button" className="nav-btn nav-btn--compact" onClick={onCopyResponseBody}>
+              复制 Body
+            </button>
+          ) : null}
+          <button type="button" className="nav-btn nav-btn--compact" onClick={onCopyCurl}>
+            复制 cURL
+          </button>
+          <button type="button" className="nav-btn nav-btn--compact" onClick={onDownloadCurl}>
+            下载脚本
+          </button>
+          {onOpenInWorkbench ? (
+            <button type="button" className="primary nav-btn--compact" onClick={onOpenInWorkbench}>
+              在工作台打开
+            </button>
+          ) : null}
+          <button type="button" className="nav-btn nav-btn--compact" onClick={onSaveCase}>
+            保存为用例
+          </button>
+        </div>
+      </div>
+
+      <div className="capture-detail-tabs" role="tablist" aria-label="明细类型">
+        {tabs.map((t) => (
+          <button
+            key={t.id}
+            type="button"
+            role="tab"
+            aria-selected={detailTab === t.id}
+            className={`capture-detail-tab${detailTab === t.id ? " capture-detail-tab--active" : ""}`}
+            onClick={() => onTabChange(t.id)}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
+
+      <div className="capture-detail-body">
+        {detailTab === "response" && (
+          <CapturePayloadPane
+            headers={resp?.headers}
+            body={resp?.body}
+            ws={ws}
+            payloadView={payloadView}
+            onPayloadView={setPayloadView}
+          />
+        )}
+
+        {detailTab === "request" && (
+          <CapturePayloadPane
+            method={parsed?.request?.method}
+            url={parsed?.request?.url}
+            headers={parsed?.request?.headers}
+            body={parsed?.request?.body}
+            payloadView={payloadView}
+            onPayloadView={setPayloadView}
+          />
+        )}
+
+        {detailTab === "curl" && <pre className="capture-scroll-block capture-scroll-block--curl">{draftCurl}</pre>}
+
+        {detailTab === "yaml" && <DraftYaml draft={draftYaml} />}
+
+        {detailTab === "raw" && (
+          <pre className="capture-scroll-block capture-scroll-block--mono">{JSON.stringify(tx, null, 2)}</pre>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function CaptureHeaderTable({ headers }: { headers?: Record<string, string> }) {
+  const rows = headerEntries(headers);
+  if (!rows.length) {
+    return <p className="capture-empty-hint">（无 Header）</p>;
+  }
+  return (
+    <div className="capture-headers-table-wrap">
+      <table className="capture-headers-table">
+        <tbody>
+          {rows.map(([k, v]) => (
+            <tr key={k}>
+              <th scope="row">{k}</th>
+              <td>{v}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function CapturePayloadPane({
+  method,
+  url,
+  headers,
+  body,
+  ws,
+  payloadView,
+  onPayloadView,
+}: {
+  method?: string;
+  url?: string;
+  headers?: Record<string, string>;
+  body?: unknown;
+  ws?: { from_client?: boolean; type?: string; body?: string };
+  payloadView: "body" | "headers";
+  onPayloadView: (v: "body" | "headers") => void;
+}) {
+  const contentType = pickContentType(headers);
+  const imageMime = sniffImageMime(body, headers);
+  const bodyText = ws?.body ?? formatCaptureBodyText(body, headers);
+  const imageSrc = !ws?.body ? captureBodyImageSrc(headers, body) : null;
+
+  return (
+    <div className="capture-payload-pane">
+      {url ? (
+        <div className="capture-req-banner">
+          <span className={`method-tag method-${(method ?? "GET").toLowerCase()}`}>{method ?? "GET"}</span>
+          <span className="capture-req-url" title={url}>
+            {url}
+          </span>
+        </div>
+      ) : null}
+      {ws ? (
+        <p className="hint capture-ws-note">
+          WebSocket · {ws.from_client ? "上行" : "下行"} · {ws.type ?? "text"}
+        </p>
+      ) : null}
+
+      <div className="capture-subtabs" role="tablist" aria-label="报文">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={payloadView === "body"}
+          className={`capture-subtab${payloadView === "body" ? " capture-subtab--active" : ""}`}
+          onClick={() => onPayloadView("body")}
+        >
+          Body
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={payloadView === "headers"}
+          className={`capture-subtab${payloadView === "headers" ? " capture-subtab--active" : ""}`}
+          onClick={() => onPayloadView("headers")}
+        >
+          Headers
+          <span className="capture-subtab-count">{headerEntries(headers).length}</span>
+        </button>
+        {contentType ? <span className="capture-subtabs-ct">{contentType}</span> : null}
+      </div>
+
+      {payloadView === "headers" ? (
+        <CaptureHeaderTable headers={headers} />
+      ) : imageSrc ? (
+        <div className="capture-image-preview">
+          <img src={imageSrc} alt={contentType ?? imageMime ?? "响应图片"} />
+          <p className="hint">图片响应（{contentType ?? imageMime}）</p>
+        </div>
+      ) : imageMime ? (
+        <p className="capture-empty-hint">{bodyText}</p>
+      ) : (
+        <pre className="capture-scroll-block capture-scroll-block--mono">{bodyText}</pre>
+      )}
+    </div>
   );
 }
 

@@ -1,0 +1,8 @@
+name: smoke
+description: 冒烟套件
+cases:
+  - catesorting
+  - dayk
+  - groupwithstockstree
+  - quote
+  - sectormultiplesort

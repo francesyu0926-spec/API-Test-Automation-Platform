@@ -59,16 +59,29 @@ function buildStats(samples: HttpBenchmarkSample[], wallMs: number): HttpBenchma
 const MAX_TOTAL = 500;
 const MAX_CONCURRENCY = 50;
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 export async function runHttpBenchmark(
   payload: HttpSendPayload,
   options: HttpBenchmarkOptions,
   meta?: { name?: string },
 ): Promise<HttpBenchmarkReport> {
   cancelRequested = false;
-  const total = Math.min(Math.max(1, Math.floor(options.total)), MAX_TOTAL);
   const concurrency = Math.min(Math.max(1, Math.floor(options.concurrency)), MAX_CONCURRENCY);
-  const warmup = Math.min(Math.max(0, Math.floor(options.warmup ?? 0)), total - 1);
+  const loopsInput = options.loops != null ? Math.max(1, Math.floor(options.loops)) : null;
+  let total: number;
+  let effectiveLoops: number | null = null;
+  if (loopsInput != null) {
+    total = Math.min(concurrency * loopsInput, MAX_TOTAL);
+    effectiveLoops = Math.max(1, Math.ceil(total / concurrency));
+  } else {
+    total = Math.min(Math.max(1, Math.floor(options.total ?? concurrency)), MAX_TOTAL);
+  }
+  const warmup = Math.min(Math.max(0, Math.floor(options.warmup ?? 0)), Math.max(0, total - 1));
   const timeoutMs = options.timeoutMs ?? payload.timeoutMs ?? 60_000;
+  const rampUpSec = Math.max(0, options.rampUpSec ?? 0);
 
   const startedAt = new Date().toISOString();
   const reportId = randomBytes(8).toString("hex");
@@ -91,7 +104,20 @@ export async function runHttpBenchmark(
     });
   };
 
-  const worker = async (): Promise<void> => {
+  const worker = async (workerId: number): Promise<void> => {
+    if (rampUpSec > 0 && concurrency > 1) {
+      const delayMs = (rampUpSec * 1000 * workerId) / concurrency;
+      if (delayMs > 0) await sleep(delayMs);
+    }
+    if (effectiveLoops != null) {
+      for (let loop = 0; loop < effectiveLoops; loop++) {
+        if (cancelRequested) break;
+        const index = workerId * effectiveLoops + loop;
+        if (index >= total) break;
+        await runOne(index);
+      }
+      return;
+    }
     while (!cancelRequested) {
       const index = nextIndex++;
       if (index >= total) break;
@@ -99,16 +125,25 @@ export async function runHttpBenchmark(
     }
   };
 
-  await Promise.all(Array.from({ length: concurrency }, () => worker()));
+  await Promise.all(Array.from({ length: concurrency }, (_, workerId) => worker(workerId)));
 
   samples.sort((a, b) => a.index - b.index);
   const wallMs = Math.round(performance.now() - wallStart);
+
+  const normalizedOptions: HttpBenchmarkOptions = {
+    total,
+    concurrency,
+    loops: effectiveLoops ?? undefined,
+    rampUpSec: rampUpSec > 0 ? rampUpSec : undefined,
+    warmup,
+    timeoutMs,
+  };
 
   return {
     id: reportId,
     startedAt,
     request: { method: payload.method, url: payload.url, name: meta?.name },
-    options: { total, concurrency, warmup, timeoutMs },
+    options: normalizedOptions,
     stats: buildStats(samples, wallMs),
     samples,
     cancelled: cancelRequested,

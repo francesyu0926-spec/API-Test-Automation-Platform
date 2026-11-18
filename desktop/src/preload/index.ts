@@ -159,6 +159,7 @@ export type AtpApi = {
   openMitmIt: () => Promise<void>;
   stopAllCapture: (closeSession: boolean) => Promise<{ message: string }>;
   restoreNetworkOnly: () => Promise<{ message: string }>;
+  ensureNetworkDirect: () => Promise<{ recovered: boolean; messages: string[] }>;
   listCollections: (projectId: string) => Promise<
     Array<{ id: string; name: string; requestCount: number }>
   >;
@@ -249,6 +250,7 @@ const api: AtpApi = {
   openMitmIt: () => ipcRenderer.invoke("atp:openMitmIt"),
   stopAllCapture: (closeSession) => ipcRenderer.invoke("atp:stopAllCapture", closeSession),
   restoreNetworkOnly: () => ipcRenderer.invoke("atp:restoreNetworkOnly"),
+  ensureNetworkDirect: () => ipcRenderer.invoke("atp:ensureNetworkDirect"),
   listCollections: (projectId) => ipcRenderer.invoke("atp:listCollections", projectId),
   getCollection: (projectId, collectionId) => ipcRenderer.invoke("atp:getCollection", projectId, collectionId),
   saveCollection: (projectId, collection) => ipcRenderer.invoke("atp:saveCollection", projectId, collection),

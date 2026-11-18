@@ -4,14 +4,14 @@
   "folders": [],
   "requests": [
     {
-      "id": "d89571e8-840",
-      "name": "paymentErrorHandler",
+      "id": "02429acf-992",
+      "name": "模拟支付",
       "method": "GET",
       "url": "https://www.bidding.shanxiguandian.com/api/project_register/paymentErrorHandler?registerId=8247",
       "headers": [
         {
           "key": "token",
-          "value": "{{token}}",
+          "value": "ed3f446867a240f677dd9fc6aa0fcea1",
           "enabled": true
         }
       ],

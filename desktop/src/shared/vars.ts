@@ -40,3 +40,40 @@ export function findUndefinedVars(text: string, variables: Record<string, string
   }
   return [...missing];
 }
+
+export function templateVarNamesInDraft(draft: {
+  url: string;
+  query: { value: string }[];
+  headers: { value: string }[];
+  body: string;
+}): string[] {
+  const blobs = [
+    draft.url,
+    draft.body,
+    ...draft.query.map((q) => q.value),
+    ...draft.headers.map((h) => h.value),
+  ];
+  const keys = new Set<string>();
+  for (const text of blobs) {
+    for (const m of text.matchAll(VAR_RE)) {
+      if (m[1]) keys.add(m[1]);
+    }
+  }
+  return [...keys];
+}
+
+/** 请求模板中引用但环境未配置或值为空的变量 */
+export function findUnresolvedTemplateVars(
+  draft: {
+    url: string;
+    query: { value: string }[];
+    headers: { value: string }[];
+    body: string;
+  },
+  variables: Record<string, string>,
+): string[] {
+  return templateVarNamesInDraft(draft).filter((name) => {
+    if (!(name in variables)) return true;
+    return !String(variables[name] ?? "").trim();
+  });
+}

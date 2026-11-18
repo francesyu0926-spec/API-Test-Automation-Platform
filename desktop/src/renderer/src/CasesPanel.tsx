@@ -10,10 +10,17 @@ type Props = {
   project: string;
   cases: string[];
   onRefresh: () => void;
+  onCasePreviewChange?: (ctx: { caseName: string | null; yaml: string }) => void;
   onOpenInWorkbench?: (draft: WorkbenchDraft) => void;
 };
 
-export default function CasesPanel({ project, cases, onRefresh, onOpenInWorkbench }: Props) {
+export default function CasesPanel({
+  project,
+  cases,
+  onRefresh,
+  onCasePreviewChange,
+  onOpenInWorkbench,
+}: Props) {
   const [selectedCase, setSelectedCase] = useState<string | null>(null);
   const [yamlText, setYamlText] = useState("");
   const [editing, setEditing] = useState(false);
@@ -80,6 +87,11 @@ export default function CasesPanel({ project, cases, onRefresh, onOpenInWorkbenc
   useEffect(() => {
     if (listPage > listPageCount) setListPage(listPageCount);
   }, [listPage, listPageCount]);
+
+  useEffect(() => {
+    onCasePreviewChange?.({ caseName: selectedCase, yaml: yamlText });
+  }, [selectedCase, yamlText, onCasePreviewChange]);
+  // onCasePreviewChange 在 App 内做浅比较，避免重复 setState
 
   const showMsg = (text: string) => {
     setMessage(text);

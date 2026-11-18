@@ -29,7 +29,7 @@ export function parseCaptureHostList(input: string): string[] {
   return [...new Set(parts.map(tokenToHost).filter(Boolean))];
 }
 
-export function hostsForPac(input: string, fallback = "httpbin.org"): string[] {
-  const parsed = parseCaptureHostList(input);
-  return parsed.length ? parsed : [fallback];
+/** 无输入时不注入默认域名，由调用方校验或提示用户填写 */
+export function hostsForPac(input: string): string[] {
+  return parseCaptureHostList(input);
 }

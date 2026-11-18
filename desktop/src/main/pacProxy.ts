@@ -4,6 +4,7 @@ import path from "node:path";
 import { platform } from "node:os";
 
 import { getRepoRoot } from "./repo";
+import { parseCaptureHostList } from "./captureHosts";
 import { refreshWininetFromPs } from "./windowsProxy";
 
 const PAC_REG_KEY = "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings";
@@ -22,7 +23,7 @@ function runPowerShell(command: string): string {
 export async function writePacFile(hosts: string[], mitmPort: number): Promise<string> {
   const list = hosts.map((h) => h.trim().toLowerCase()).filter(Boolean);
   if (!list.length) {
-    list.push("httpbin.org");
+    throw new Error("PAC 域名列表为空，请填写要快照的 API 主机名");
   }
   const hostJs = list.map((h) => `"${h.replace(/"/g, "")}"`).join(", ");
   const pac = `function FindProxyForURL(url, host) {
@@ -38,6 +39,35 @@ export async function writePacFile(hosts: string[], mitmPort: number): Promise<s
 }
 `;
   const pacPath = path.join(getRepoRoot(), "scripts", "atp-proxy.pac");
+  await fs.writeFile(pacPath, pac, "utf8");
+  return pacPath;
+}
+
+/**
+ * 内嵌 WebView：除内网/本机与用户配置的直连域外，其余 HTTP(S) 走 mitm（便于抓到 iframe/H5 外链）。
+ */
+export async function writeEmbeddedWebPacFile(bypassHostsInput: string, mitmPort: number): Promise<string> {
+  const bypass = parseCaptureHostList(bypassHostsInput);
+  const bypassJs = bypass.map((h) => `"${h.replace(/"/g, "")}"`).join(", ");
+  const pac = `function FindProxyForURL(url, host) {
+  host = (host || "").toLowerCase();
+  if (!host) return "DIRECT";
+  if (host === "localhost" || host === "127.0.0.1" || host === "::1") return "DIRECT";
+  if (shExpMatch(host, "10.*") || shExpMatch(host, "192.168.*") || shExpMatch(host, "169.254.*")) return "DIRECT";
+  if (shExpMatch(host, "172.1*") || shExpMatch(host, "172.2*") || shExpMatch(host, "172.3*")) return "DIRECT";
+  var bypass = [${bypassJs}];
+  for (var i = 0; i < bypass.length; i++) {
+    var p = bypass[i];
+    if (host === p || dnsDomainIs(host, p) || shExpMatch(host, "*." + p)) return "DIRECT";
+  }
+  var proto = (url || "").substring(0, 6).toLowerCase();
+  if (proto === "http:" || proto === "https") {
+    return "PROXY 127.0.0.1:${mitmPort}";
+  }
+  return "DIRECT";
+}
+`;
+  const pacPath = path.join(getRepoRoot(), "scripts", "atp-proxy-embedded.pac");
   await fs.writeFile(pacPath, pac, "utf8");
   return pacPath;
 }

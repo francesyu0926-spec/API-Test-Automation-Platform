@@ -1,15 +1,26 @@
 import { useEffect, useState } from "react";
 
+import ProjectTargetField from "./ProjectTargetField";
+
 type Props = {
   open: boolean;
+  defaultProjectId?: string;
+  suggestedBaseUrl?: string;
   defaultName: string;
   yamlPreview: string;
   onCancel: () => void;
-  onConfirm: (opts: { caseName: string; addToSuite: boolean; suiteName: string }) => void;
+  onConfirm: (opts: {
+    projectId: string;
+    caseName: string;
+    addToSuite: boolean;
+    suiteName: string;
+  }) => void;
 };
 
 export default function SaveCaseDialog({
   open,
+  defaultProjectId,
+  suggestedBaseUrl,
   defaultName,
   yamlPreview,
   onCancel,
@@ -18,12 +29,16 @@ export default function SaveCaseDialog({
   const [caseName, setCaseName] = useState(defaultName);
   const [addToSuite, setAddToSuite] = useState(true);
   const [suiteName, setSuiteName] = useState("smoke");
+  const [projectId, setProjectId] = useState("");
 
   useEffect(() => {
-    if (open) setCaseName(defaultName);
+    if (!open) return;
+    setCaseName(defaultName);
   }, [open, defaultName]);
 
   if (!open) return null;
+
+  const canSave = Boolean(projectId.trim() && caseName.trim());
 
   return (
     <div className="modal-overlay" role="presentation">
@@ -36,6 +51,13 @@ export default function SaveCaseDialog({
         <h4 id="save-case-title" className="modal-title">
           保存为自动化用例
         </h4>
+        <ProjectTargetField
+          active={open}
+          value={projectId}
+          onChange={setProjectId}
+          defaultProjectId={defaultProjectId}
+          suggestedBaseUrl={suggestedBaseUrl}
+        />
         <label className="perf-field" style={{ marginBottom: 12, width: "100%" }}>
           <span>用例文件名（cases/*.yaml）</span>
           <input
@@ -66,7 +88,15 @@ export default function SaveCaseDialog({
           <button
             type="button"
             className="primary"
-            onClick={() => onConfirm({ caseName, addToSuite, suiteName })}
+            disabled={!canSave}
+            onClick={() =>
+              onConfirm({
+                projectId: projectId.trim(),
+                caseName: caseName.trim(),
+                addToSuite,
+                suiteName,
+              })
+            }
           >
             保存
           </button>

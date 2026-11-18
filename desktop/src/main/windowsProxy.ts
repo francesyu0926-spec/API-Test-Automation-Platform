@@ -55,12 +55,47 @@ export async function setWinHttpProxy(host: string, port: number): Promise<{ ok:
 
 export async function resetWinHttpProxy(): Promise<void> {
   if (platform() !== "win32" || !winHttpTouched) return;
+  await resetWinHttpProxyAlways();
+}
+
+/** 无条件重置 WinHTTP（进程重启后 winHttpTouched 会丢失，必须按实际配置清理） */
+/** 让 WinHTTP 与 IE/系统 PAC 一致（部分桌面客户端 API 常走 WinHTTP） */
+export async function importWinHttpProxyFromIe(): Promise<{ ok: boolean; message: string }> {
+  if (platform() !== "win32") return { ok: false, message: "" };
   try {
-    await execFileAsync("netsh", ["winhttp", "reset", "proxy"], { encoding: "utf8", windowsHide: true });
-  } catch {
-    /* ignore */
+    await execFileAsync("netsh", ["winhttp", "import", "proxy", "source=ie"], {
+      encoding: "utf8",
+      windowsHide: true,
+    });
+    winHttpTouched = true;
+    const detail = (await showWinHttpProxy()).split(/\r?\n/)[0]?.trim();
+    return {
+      ok: true,
+      message: detail
+        ? `WinHTTP 已同步系统 PAC（${detail.slice(0, 80)}）`
+        : "WinHTTP 已同步系统 PAC",
+    };
+  } catch (e) {
+    return { ok: false, message: e instanceof Error ? e.message : String(e) };
   }
-  winHttpTouched = false;
+}
+
+export async function resetWinHttpProxyAlways(): Promise<boolean> {
+  if (platform() !== "win32") return false;
+  try {
+    const before = await showWinHttpProxy();
+    await execFileAsync("netsh", ["winhttp", "reset", "proxy"], { encoding: "utf8", windowsHide: true });
+    winHttpTouched = false;
+    const after = await showWinHttpProxy();
+    return before !== after || /127\.0\.0\.1:\d+|:\d+/.test(before);
+  } catch {
+    return false;
+  }
+}
+
+export function winHttpPointsToMitm(text: string, mitmPort = 8888): boolean {
+  const t = text.toLowerCase();
+  return t.includes(`127.0.0.1:${mitmPort}`) || new RegExp(`:\\s*127\\.0\\.0\\.1\\s*:\\s*${mitmPort}`).test(t);
 }
 
 export async function getWinHttpProxyStatus(): Promise<string> {
@@ -176,7 +211,11 @@ export async function restoreWindowsSystemProxy(): Promise<{ ok: boolean; messag
 /** 强制关闭代理，便于页面恢复访问 */
 export async function forceDisableSystemProxy(): Promise<{ ok: boolean; message: string }> {
   if (platform() !== "win32") return { ok: true, message: "" };
+  const winHttpBefore = await showWinHttpProxy();
   await resetWinHttpProxy();
+  if (winHttpPointsToMitm(winHttpBefore)) {
+    await resetWinHttpProxyAlways();
+  }
   try {
     runPowerShell(
       `$p='HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings'; ` +

@@ -2,16 +2,23 @@ import { useEffect, useMemo, useState } from "react";
 
 import { previewProjectId } from "./projectIdPreview";
 
-const DEFAULT_BASE_URL = "https://terminal.sfccn.com";
+const DEFAULT_BASE_URL = "https://api.example.com";
 
 type Props = {
   open: boolean;
+  nested?: boolean;
   suggestedBaseUrl?: string;
   onCancel: () => void;
   onCreate: (opts: { id: string; name: string; baseUrl: string }) => void;
 };
 
-export default function CreateProjectDialog({ open, suggestedBaseUrl, onCancel, onCreate }: Props) {
+export default function CreateProjectDialog({
+  open,
+  nested,
+  suggestedBaseUrl,
+  onCancel,
+  onCreate,
+}: Props) {
   const [id, setId] = useState("");
   const [name, setName] = useState("");
   const [baseUrl, setBaseUrl] = useState(DEFAULT_BASE_URL);
@@ -27,7 +34,7 @@ export default function CreateProjectDialog({ open, suggestedBaseUrl, onCancel, 
   if (!open) return null;
 
   return (
-    <div className="modal-overlay" role="presentation">
+    <div className={`modal-overlay${nested ? " modal-overlay--nested" : ""}`} role="presentation">
       <div className="modal-card" role="dialog" onMouseDown={(e) => e.stopPropagation()}>
         <h4 className="modal-title">新建项目</h4>
         <label className="perf-field" style={{ width: "100%", marginBottom: 10 }}>

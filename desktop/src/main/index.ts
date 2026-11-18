@@ -43,10 +43,22 @@ function createWindow(): void {
     },
   });
 
-  if (process.env.ELECTRON_RENDERER_URL) {
-    win.loadURL(process.env.ELECTRON_RENDERER_URL);
+  win.webContents.on("did-fail-load", (_e, code, desc, url) => {
+    console.error("[renderer] did-fail-load", code, desc, url);
+  });
+  win.webContents.on("render-process-gone", (_e, details) => {
+    console.error("[renderer] render-process-gone", details);
+  });
+
+  const rendererUrl = process.env.ELECTRON_RENDERER_URL;
+  if (rendererUrl) {
+    void win.loadURL(rendererUrl).catch((err) => {
+      console.error("[renderer] loadURL failed", rendererUrl, err);
+    });
   } else {
-    win.loadFile(path.join(__dirname, "../renderer/index.html"));
+    void win.loadFile(path.join(__dirname, "../renderer/index.html")).catch((err) => {
+      console.error("[renderer] loadFile failed", err);
+    });
   }
 
   win.webContents.setWindowOpenHandler(({ url }) => {
@@ -196,6 +208,7 @@ ipcMain.handle("atp:copyChromeRestart", () => {
 ipcMain.handle("atp:openMitmIt", () => mitmCert.openMitmItCertPage());
 ipcMain.handle("atp:stopAllCapture", (_e, closeSession: boolean) => capture.stopAllCapture(closeSession));
 ipcMain.handle("atp:restoreNetworkOnly", () => capture.restoreNetworkOnly());
+ipcMain.handle("atp:ensureNetworkDirect", () => capture.ensureNetworkDirect());
 
 ipcMain.handle("atp:listCollections", (_e, projectId: string) => collections.listCollections(projectId));
 ipcMain.handle("atp:getCollection", (_e, projectId: string, collectionId: string) =>

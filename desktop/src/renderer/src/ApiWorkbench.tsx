@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { ApiCollectionFile, HttpSendResult, WsEvent, WorkbenchDraft } from "../../shared/apiWorkbenchTypes";
-import PerfPanel from "./PerfPanel";
 import ConfirmDialog from "./ConfirmDialog";
 import SaveCaseDialog from "./SaveCaseDialog";
 import { workbenchDraftToCaseYaml } from "./caseYaml";
 import ImportCurlDialog from "./ImportCurlDialog";
 import CreateEnvDialog from "./CreateEnvDialog";
 import EnvVariablesDialog, { collectTemplateVarNames } from "./EnvVariablesDialog";
+import EnvContextBar from "./EnvContextBar";
 import LoadingOverlay from "./LoadingOverlay";
 import { substituteVars } from "../../shared/vars";
 import { resolveWorkbenchPayload, resolveWorkbenchWsConnect } from "./resolveWorkbenchRequest";
@@ -24,18 +24,29 @@ import {
   normalizeRawBodyDraft,
   savedRequestToDraft,
 } from "./apiWorkbenchModel";
+import {
+  httpUrlToWsUrl,
+  resolvedUrlLooksLikeWs,
+  shouldSuggestWsAfterHttp,
+} from "./workbenchWsHint";
+import { applyImportedCurlAuth, unresolvedWorkbenchVars } from "./samplerAuth";
 
 type Props = {
   project: string;
-  projects: { id: string; name: string }[];
-  onProject: (id: string) => void;
+  projectName: string;
   externalDraft: WorkbenchDraft | null;
+  collectionReloadNonce?: number;
   onConsumeExternalDraft: () => void;
   onCaseSaved?: () => void;
   onRequestCreateProject?: (suggestedBaseUrl?: string) => void;
+  onSendToLoadTest?: (payload: {
+    draft: WorkbenchDraft;
+    envName: string;
+    variables: Record<string, string>;
+  }) => void;
 };
 
-type ReqTab = "params" | "headers" | "body" | "perf";
+type ReqTab = "params" | "headers" | "body";
 type Protocol = "http" | "ws";
 
 type WsLogLine = {
@@ -56,15 +67,17 @@ function formatWsTime(): string {
 
 export default function ApiWorkbench({
   project,
-  projects,
-  onProject,
+  projectName,
   externalDraft,
+  collectionReloadNonce = 0,
   onConsumeExternalDraft,
   onCaseSaved,
   onRequestCreateProject,
+  onSendToLoadTest,
 }: Props) {
   const [collections, setCollections] = useState<Awaited<ReturnType<typeof window.atp.listCollections>>>([]);
   const [collectionId, setCollectionId] = useState("default");
+  const [saveTargetCollectionId, setSaveTargetCollectionId] = useState("default");
   const [collection, setCollection] = useState<ApiCollectionFile | null>(null);
   const [activeRequestId, setActiveRequestId] = useState<string | null>(null);
   const [draft, setDraft] = useState<WorkbenchDraft>(defaultDraft());
@@ -73,6 +86,7 @@ export default function ApiWorkbench({
   const [response, setResponse] = useState<HttpSendResult | null>(null);
   const [respView, setRespView] = useState<"body" | "headers">("body");
   const [toast, setToast] = useState("");
+  const [wsSwitchHint, setWsSwitchHint] = useState(false);
   const [saveCaseOpen, setSaveCaseOpen] = useState(false);
   const [envName, setEnvName] = useState("dev");
   const [environments, setEnvironments] = useState<string[]>(["dev"]);
@@ -84,6 +98,7 @@ export default function ApiWorkbench({
   const [pendingRequestDelete, setPendingRequestDelete] = useState<string | null>(null);
   const [importCurlOpen, setImportCurlOpen] = useState(false);
   const [pendingCaseOverwrite, setPendingCaseOverwrite] = useState<{
+    projectId: string;
     caseName: string;
     addToSuite: boolean;
     suiteName: string;
@@ -95,7 +110,26 @@ export default function ApiWorkbench({
   const [wsConnecting, setWsConnecting] = useState(false);
   const [wsLog, setWsLog] = useState<WsLogLine[]>([]);
   const [workbenchLoading, setWorkbenchLoading] = useState(false);
+  const [draftImporting, setDraftImporting] = useState(false);
   const [variablesLoading, setVariablesLoading] = useState(false);
+  const RESPONSE_HEIGHT_KEY = "atp:workbenchResponseH";
+  const [responsePaneHeight, setResponsePaneHeight] = useState(() => {
+    try {
+      const raw = sessionStorage.getItem(RESPONSE_HEIGHT_KEY);
+      const n = raw ? Number(raw) : 300;
+      return Number.isFinite(n) ? Math.min(720, Math.max(140, n)) : 300;
+    } catch {
+      return 300;
+    }
+  });
+  const [splitDragging, setSplitDragging] = useState(false);
+  const splitDragRef = useRef<{ startY: number; startH: number } | null>(null);
+  const responsePaneHeightRef = useRef(responsePaneHeight);
+  responsePaneHeightRef.current = responsePaneHeight;
+  const sendAfterEnvSaveRef = useRef(false);
+  const consumeExternalDraftRef = useRef(onConsumeExternalDraft);
+  consumeExternalDraftRef.current = onConsumeExternalDraft;
+  const externalDraftGenRef = useRef(0);
 
   const showToast = (text: string) => {
     setToast(text);
@@ -120,6 +154,20 @@ export default function ApiWorkbench({
     if (!collections.length) return collectionId || "default";
     return collections.some((c) => c.id === collectionId) ? collectionId : collections[0].id;
   }, [collections, collectionId]);
+
+  const effectiveSaveTargetId = useMemo(() => {
+    if (!collections.length) return saveTargetCollectionId || "default";
+    return collections.some((c) => c.id === saveTargetCollectionId)
+      ? saveTargetCollectionId
+      : collections[0].id;
+  }, [collections, saveTargetCollectionId]);
+
+  useEffect(() => {
+    if (!project) return;
+    setSaveTargetCollectionId((prev) =>
+      collections.some((c) => c.id === prev) ? prev : effectiveCollectionId,
+    );
+  }, [project, collections, effectiveCollectionId]);
 
   useEffect(() => {
     if (!project || !collections.length) return;
@@ -216,25 +264,71 @@ export default function ApiWorkbench({
   }, [protocol, resetWsSession]);
 
   useEffect(() => {
-    if (protocol === "ws" && reqTab === "perf") setReqTab("params");
-  }, [protocol, reqTab]);
-
-  useEffect(() => {
+    void loadCollections();
     void loadCollection();
-  }, [loadCollection]);
+  }, [loadCollection, loadCollections, collectionReloadNonce]);
+
+  const openEnvConfig = useCallback((reason?: string) => {
+    if (reason) showToast(reason);
+    setEnvDialogOpen(true);
+  }, []);
+
+  const ensureEnvReadyForDraft = useCallback(
+    (
+      target: WorkbenchDraft,
+      opts?: { markResendAfterSave?: boolean },
+      varsSnapshot?: Record<string, string>,
+    ): boolean => {
+      const store = varsSnapshot ?? variables;
+      const unresolved = unresolvedWorkbenchVars(target, store);
+      if (!unresolved.length) return true;
+      if (opts?.markResendAfterSave) sendAfterEnvSaveRef.current = true;
+      openEnvConfig(`请先配置环境变量：${unresolved.join("、")}`);
+      return false;
+    },
+    [variables, openEnvConfig],
+  );
 
   useEffect(() => {
     if (!externalDraft) return;
-    const normalized = normalizeRawBodyDraft(externalDraft);
-    setDraft(normalized);
-    setActiveRequestId(null);
-    setResponse(null);
-    resetWsSession();
-    if (isWsUrl(normalized.url)) setProtocol("ws");
-    else setProtocol("http");
-    onConsumeExternalDraft();
-    showToast("已从抓包载入请求");
-  }, [externalDraft, onConsumeExternalDraft, resetWsSession]);
+    const incoming = externalDraft;
+    const generation = ++externalDraftGenRef.current;
+    consumeExternalDraftRef.current();
+    setDraftImporting(true);
+    void (async () => {
+      try {
+        let normalized = normalizeRawBodyDraft(incoming);
+        const { draft: withAuth, savedKeys } = await applyImportedCurlAuth(project, envName, normalized);
+        normalized = withAuth;
+        let vars = variables;
+        if (project) {
+          vars = await window.atp.getProjectVariables(project, envName);
+          if (generation === externalDraftGenRef.current) setVariables(vars);
+        }
+        if (generation !== externalDraftGenRef.current) return;
+        setDraft(normalized);
+        setActiveRequestId(null);
+        setResponse(null);
+        resetWsSession();
+        if (isWsUrl(normalized.url)) setProtocol("ws");
+        else setProtocol("http");
+        const savedHint =
+          savedKeys.length > 0
+            ? `，${savedKeys.join("、")} 已同步到 env:${envName}.local.yaml`
+            : "";
+        const unresolved = unresolvedWorkbenchVars(normalized, vars);
+        if (unresolved.length) {
+          openEnvConfig(
+            `已载入用例${savedHint}。请在下方填写 ${unresolved.join("、")}（项目级环境，保存后本项目的用例与 Send 共用）`,
+          );
+        } else {
+          showToast(savedKeys.length ? `已载入请求${savedHint}` : "已载入请求，环境变量已就绪");
+        }
+      } finally {
+        if (generation === externalDraftGenRef.current) setDraftImporting(false);
+      }
+    })();
+  }, [externalDraft, project, envName, resetWsSession, openEnvConfig]);
 
   const folderGroups = useMemo(() => {
     const reqs = collection?.requests ?? [];
@@ -261,6 +355,7 @@ export default function ApiWorkbench({
       return;
     }
     setActiveRequestId(id);
+    setSaveTargetCollectionId(effectiveCollectionId);
     const nextDraft = savedRequestToDraft(req);
     setDraft(nextDraft);
     setResponse(null);
@@ -292,6 +387,7 @@ export default function ApiWorkbench({
   };
 
   const onWsConnect = async () => {
+    if (!ensureEnvReadyForDraft(draft)) return;
     let resolvedUrl = "";
     try {
       resolvedUrl = resolveWorkbenchWsConnect(draft, variables).url;
@@ -340,6 +436,7 @@ export default function ApiWorkbench({
   };
 
   const onWsSend = async () => {
+    if (!ensureEnvReadyForDraft(draft, { markResendAfterSave: true })) return;
     if (!wsOpen) {
       showToast("请先连接 WebSocket");
       return;
@@ -368,21 +465,35 @@ export default function ApiWorkbench({
     appendWsLog("out", data);
   };
 
-  const onSend = async () => {
+  const onSend = async (sendOpts?: { varsOverride?: Record<string, string>; skipEnvGate?: boolean }) => {
     if (protocol === "ws") {
       await onWsSend();
       return;
     }
+    const activeVars = sendOpts?.varsOverride ?? variables;
     if (!buildUrl(draft.url, draft.query).trim() && !draft.url.trim()) {
       showToast("请填写 URL");
       return;
     }
+    if (
+      !sendOpts?.skipEnvGate &&
+      !ensureEnvReadyForDraft(draft, { markResendAfterSave: true }, activeVars)
+    ) {
+      return;
+    }
     setSending(true);
     setResponse(null);
+    setWsSwitchHint(false);
+    if (resolvedUrlLooksLikeWs(draft)) {
+      showToast("URL 像 WebSocket 行情通道；若 HTTP 返回 404，请切到 WS 后点 Connect");
+    }
     try {
-      const payload = resolveWorkbenchPayload(draft, variables);
+      const payload = resolveWorkbenchPayload(draft, activeVars);
       const res = await window.atp.sendHttpRequest(payload);
       setResponse(res);
+      if (shouldSuggestWsAfterHttp(res.status, payload.url, payload.method)) {
+        setWsSwitchHint(true);
+      }
       if (res.error) showToast(res.error);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -405,7 +516,7 @@ export default function ApiWorkbench({
 
   const saveCurrent = async () => {
     if (!project) {
-      showToast(projects.length ? "请先在上方工作区选择项目" : "请先新建项目后再保存到集合");
+      showToast("请先在左侧工作区选择项目");
       openCreateProject();
       return;
     }
@@ -414,19 +525,19 @@ export default function ApiWorkbench({
       showToast("请填写 URL 后再保存");
       return;
     }
-    let col = collection;
-    const moduleId = effectiveCollectionId || collections[0]?.id || "default";
-    if (!col) {
-      try {
-        col = (await window.atp.getCollection(project, moduleId)) ?? (await window.atp.ensureCollection(project, moduleId));
-        setCollection(col);
-        if (moduleId !== collectionId) setCollectionId(moduleId);
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        showToast(msg || "无法加载集合模块");
-        return;
-      }
+    const targetId = effectiveSaveTargetId || collections[0]?.id || "default";
+    const targetName = collections.find((c) => c.id === targetId)?.name ?? targetId;
+    let col: ApiCollectionFile;
+    try {
+      col =
+        (await window.atp.getCollection(project, targetId)) ??
+        (await window.atp.ensureCollection(project, targetId));
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      showToast(msg || "无法加载目标集合");
+      return;
     }
+
     const id = activeRequestId ?? crypto.randomUUID().slice(0, 12);
     const normalized = normalizeRawBodyDraft({
       ...draft,
@@ -442,16 +553,41 @@ export default function ApiWorkbench({
       folders: [...folders].sort((a, b) => a.localeCompare(b, "zh")),
       requests: [...others, saved],
     };
+
+    let moved = false;
+
     try {
+      if (activeRequestId && effectiveCollectionId !== targetId) {
+        const sourceCol =
+          collection && collectionId === effectiveCollectionId
+            ? collection
+            : await window.atp.getCollection(project, effectiveCollectionId);
+        if (sourceCol?.requests.some((r) => r.id === activeRequestId)) {
+          const trimmed: ApiCollectionFile = {
+            ...sourceCol,
+            requests: sourceCol.requests.filter((r) => r.id !== activeRequestId),
+          };
+          await window.atp.saveCollection(project, trimmed);
+          if (collectionId === effectiveCollectionId) setCollection(trimmed);
+          moved = true;
+        }
+      }
       await window.atp.saveCollection(project, next);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       showToast(msg || "保存失败");
       return;
     }
-    setCollection(next);
+
+    if (targetId === effectiveCollectionId) {
+      setCollection(next);
+    } else {
+      setCollectionId(targetId);
+      setCollection(next);
+    }
+    setSaveTargetCollectionId(targetId);
     setActiveRequestId(id);
-    showToast("已保存到集合");
+    showToast(moved ? `已保存到「${targetName}」（已从原集合移出）` : `已保存到集合「${targetName}」`);
     await loadCollections();
   };
 
@@ -561,15 +697,22 @@ export default function ApiWorkbench({
     setPendingRequestDelete(activeRequestId);
   };
 
+  const responseImageSrc = useMemo(() => {
+    if (!response || respView !== "body") return null;
+    if (!response.bodyBase64 || !response.bodyMime) return null;
+    return `data:${response.bodyMime};base64,${response.bodyBase64}`;
+  }, [response, respView]);
+
   const responseBodyDisplay = useMemo(() => {
     if (!response) return "";
     if (respView !== "body") return "";
+    if (responseImageSrc) return response.bodyText;
     const emptyHint = httpEmptyBodyHint(response.status, response.bodySize);
     if (!response.bodyText && emptyHint) return emptyHint;
     const ct = response.headers["content-type"] ?? response.headers["Content-Type"] ?? "";
     if (/json/i.test(ct) && response.bodyText) return formatJsonBody(response.bodyText);
     return response.bodyText;
-  }, [response, respView]);
+  }, [response, respView, responseImageSrc]);
 
   const headerCount = draft.headers.filter((h) => h.enabled && h.key.trim()).length;
 
@@ -601,66 +744,87 @@ export default function ApiWorkbench({
 
   const openCreateProject = () => onRequestCreateProject?.(suggestProjectBaseUrl());
 
+  const onResponseSplitMouseDown = (e: React.MouseEvent) => {
+    e.preventDefault();
+    splitDragRef.current = { startY: e.clientY, startH: responsePaneHeightRef.current };
+    setSplitDragging(true);
+    const onMove = (ev: MouseEvent) => {
+      const drag = splitDragRef.current;
+      if (!drag) return;
+      const delta = ev.clientY - drag.startY;
+      const next = Math.min(720, Math.max(140, drag.startH + delta));
+      setResponsePaneHeight(next);
+    };
+    const onUp = () => {
+      splitDragRef.current = null;
+      setSplitDragging(false);
+      try {
+        sessionStorage.setItem(RESPONSE_HEIGHT_KEY, String(responsePaneHeightRef.current));
+      } catch {
+        /* ignore */
+      }
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  };
+
+  const onResponseSplitKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
+    e.preventDefault();
+    const step = e.shiftKey ? 48 : 16;
+    setResponsePaneHeight((h) => {
+      const next = e.key === "ArrowUp" ? h - step : h + step;
+      return Math.min(720, Math.max(140, next));
+    });
+  };
+
+  useEffect(() => {
+    try {
+      sessionStorage.setItem(RESPONSE_HEIGHT_KEY, String(responsePaneHeight));
+    } catch {
+      /* ignore */
+    }
+  }, [responsePaneHeight]);
+
+  const switchToWebSocketMode = () => {
+    setProtocol("ws");
+    setDraft((d) => ({
+      ...d,
+      url: httpUrlToWsUrl(d.url),
+      bodyMode: "raw",
+    }));
+    setResponse(null);
+    setWsSwitchHint(false);
+    resetWsSession();
+    setReqTab("body");
+    showToast("已切换为 WebSocket，请点击 Connect");
+  };
+
   return (
     <div className="workbench">
       <header className="workbench-topbar">
-        <h2 className="page-head workbench-title">API 工作台</h2>
-        <div className="workbench-topbar-strip">
-          <span className="workbench-topbar-label">工作区</span>
-          <select
-            className="workbench-topbar-control"
-            value={project || ""}
-            disabled={!projects.length}
-            onChange={(e) => onProject(e.target.value)}
-            aria-label="项目"
-          >
-            {!projects.length ? (
-              <option value="">暂无项目</option>
-            ) : (
-              projects.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name}
-                </option>
-              ))
-            )}
-          </select>
-          <select
-            className="workbench-topbar-control workbench-topbar-control--env"
-            value={envName}
-            disabled={!project}
-            onChange={(e) => setEnvName(e.target.value)}
-            aria-label="环境"
-          >
-            {environments.map((e) => (
-              <option key={e} value={e}>
-                env:{e}
-              </option>
-            ))}
-          </select>
-          <button
-            type="button"
-            className="nav-btn"
-            disabled={!project}
-            title={project ? "新建环境" : "请先选择项目"}
-            onClick={() => setCreateEnvOpen(true)}
-          >
-            + 环境
-          </button>
-          <button type="button" className="nav-btn" disabled={!project} onClick={() => setEnvDialogOpen(true)}>
-            变量
-          </button>
-          {!projects.length && onRequestCreateProject ? (
-            <button type="button" className="nav-btn nav-btn--ghost" onClick={openCreateProject}>
-              新建项目
-            </button>
-          ) : null}
+        <div className="module-head-row">
+          <h2 className="page-head workbench-title">API 工作台</h2>
+          <span className="module-context-chip" title={`项目 ID：${project}`}>
+            {projectName || project}
+          </span>
         </div>
+        <EnvContextBar
+          envName={envName}
+          environments={environments}
+          disabled={!project}
+          onEnvChange={setEnvName}
+          onCreateEnv={() => setCreateEnvOpen(true)}
+          onOpenVars={() => setEnvDialogOpen(true)}
+        />
       </header>
 
       <div className="workbench-body loading-host workbench-body--loadable">
         <LoadingOverlay
-          show={workbenchLoading || variablesLoading}
-          label={workbenchLoading ? "加载集合…" : "加载环境变量…"}
+          show={workbenchLoading || variablesLoading || draftImporting}
+          label={draftImporting ? "同步环境变量…" : workbenchLoading ? "加载集合…" : "加载环境变量…"}
         />
         <aside className="workbench-collections">
           <div className="workbench-sidebar-head">
@@ -670,7 +834,9 @@ export default function ApiWorkbench({
                 <select
                   value={project ? effectiveCollectionId : ""}
                   onChange={(e) => {
-                    setCollectionId(e.target.value);
+                    const nextId = e.target.value;
+                    setCollectionId(nextId);
+                    setSaveTargetCollectionId(nextId);
                     setActiveRequestId(null);
                     setDraft(defaultDraft());
                   }}
@@ -761,7 +927,11 @@ export default function ApiWorkbench({
                         className={`workbench-req-item${activeRequestId === r.id ? " active" : ""}`}
                         onClick={() => openRequest(r.id)}
                       >
-                        <span className={`method-tag method-${r.method.toLowerCase()}`}>{r.method}</span>
+                        <span
+                          className={`method-tag method-${(r.method || "GET").toLowerCase()}`}
+                        >
+                          {r.method || "GET"}
+                        </span>
                         <span className="workbench-req-name">{r.name}</span>
                       </button>
                       <button
@@ -824,7 +994,12 @@ export default function ApiWorkbench({
                 onChange={(e) => setDraft((d) => ({ ...d, url: e.target.value }))}
               />
             {protocol === "http" ? (
-              <button type="button" className="primary workbench-send" disabled={sending} onClick={() => void onSend()}>
+              <button
+                type="button"
+                className="primary workbench-send"
+                disabled={sending || draftImporting}
+                onClick={() => void onSend()}
+              >
                 {sending ? "发送中…" : "Send"}
               </button>
             ) : (
@@ -876,6 +1051,27 @@ export default function ApiWorkbench({
                   onChange={(e) => setDraft((d) => ({ ...d, folder: e.target.value }))}
                 />
               </label>
+              <label className="workbench-inline-field workbench-inline-field--save-target">
+                <span>保存到</span>
+                <select
+                  className="text-input workbench-save-target-select"
+                  value={effectiveSaveTargetId}
+                  disabled={!project || !collections.length}
+                  title="保存请求时写入的集合模块（可与左侧浏览模块不同）"
+                  onChange={(e) => setSaveTargetCollectionId(e.target.value)}
+                  aria-label="保存目标集合"
+                >
+                  {!collections.length ? (
+                    <option value="">暂无集合</option>
+                  ) : (
+                    collections.map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {c.name}
+                      </option>
+                    ))
+                  )}
+                </select>
+              </label>
               <div className="workbench-editor-actions">
                 <button type="button" className="nav-btn nav-btn--compact" onClick={() => setImportCurlOpen(true)}>
                   导入 cURL
@@ -886,6 +1082,21 @@ export default function ApiWorkbench({
                 <button type="button" className="nav-btn nav-btn--compact" onClick={() => setSaveCaseOpen(true)}>
                   保存为用例
                 </button>
+                {onSendToLoadTest && protocol === "http" ? (
+                  <button
+                    type="button"
+                    className="nav-btn nav-btn--compact"
+                    onClick={() =>
+                      onSendToLoadTest({
+                        draft: normalizeRawBodyDraft(draft),
+                        envName,
+                        variables: { ...variables },
+                      })
+                    }
+                  >
+                    发送到压测
+                  </button>
+                ) : null}
                 {activeRequestId ? (
                   <button type="button" className="nav-btn nav-btn--compact nav-btn--ghost" onClick={() => deleteActive()}>
                     删除
@@ -895,115 +1106,115 @@ export default function ApiWorkbench({
             </div>
           </div>
 
-          <div
-            className={`workbench-editor-zone workbench-editor-zone--request${reqTab === "perf" ? " workbench-editor-zone--request-full" : ""}`}
-          >
-          <div className="workbench-req-tabs">
-            {(
-              [
-                ["params", "Params"],
-                ["headers", `Headers (${headerCount})`],
-                ["body", protocol === "ws" ? "Message" : "Body"],
-                ...(protocol === "http" ? ([["perf", "性能"]] as const) : []),
-              ] as const
-            ).map(([id, label]) => (
-              <button
-                key={id}
-                type="button"
-                className={`workbench-tab${reqTab === id ? " active" : ""}`}
-                onClick={() => setReqTab(id)}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
+          <div className="workbench-editor-zone workbench-editor-zone--request">
+            <div className="workbench-req-tabs">
+              {(
+                [
+                  ["params", "Params"],
+                  ["headers", `Headers (${headerCount})`],
+                  ["body", protocol === "ws" ? "Message" : "Body"],
+                ] as const
+              ).map(([id, label]) => (
+                <button
+                  key={id}
+                  type="button"
+                  className={`workbench-tab${reqTab === id ? " active" : ""}`}
+                  onClick={() => setReqTab(id)}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
 
-          <div className="workbench-editor-pane">
-          {reqTab === "params" && (
-            <KvTable
-              rows={draft.query}
-              onChange={updateQueryRow}
-              onAdd={() => setDraft((d) => ({ ...d, query: [...d.query, emptyRow()] }))}
-            />
-          )}
-          {reqTab === "headers" && (
-            <KvTable
-              rows={draft.headers}
-              onChange={updateHeaderRow}
-              onAdd={() => setDraft((d) => ({ ...d, headers: [...d.headers, emptyRow()] }))}
-            />
-          )}
-          {reqTab === "perf" && (
-            <PerfPanel
-              draft={draft}
-              project={project}
-              variables={variables}
-              disabled={sending}
-              onToast={showToast}
-            />
-          )}
-
-          {reqTab === "body" && (
-            <div className="workbench-body-pane">
-              {protocol === "http" && (
-                <>
-                  <label className="check-label">
-                    <input
-                      type="radio"
-                      checked={draft.bodyMode === "none"}
-                      onChange={() => setDraft((d) => ({ ...d, bodyMode: "none" }))}
-                    />
-                    none
-                  </label>
-                  <label className="check-label">
-                    <input
-                      type="radio"
-                      checked={draft.bodyMode === "raw"}
-                      onChange={() => setDraft((d) => normalizeRawBodyDraft({ ...d, bodyMode: "raw" }))}
-                    />
-                    raw
-                  </label>
-                </>
+            <div className="workbench-editor-pane">
+              {reqTab === "params" && (
+                <KvTable
+                  rows={draft.query}
+                  onChange={updateQueryRow}
+                  onAdd={() => setDraft((d) => ({ ...d, query: [...d.query, emptyRow()] }))}
+                />
               )}
-              {(protocol === "ws" || draft.bodyMode === "raw") && (
-                <>
+              {reqTab === "headers" && (
+                <KvTable
+                  rows={draft.headers}
+                  onChange={updateHeaderRow}
+                  onAdd={() => setDraft((d) => ({ ...d, headers: [...d.headers, emptyRow()] }))}
+                />
+              )}
+              {reqTab === "body" && (
+                <div className="workbench-body-pane">
                   {protocol === "http" && (
-                    <select
-                      className="text-input workbench-content-type"
-                      value={draft.bodyContentType ?? "application/json"}
-                      onChange={(e) => setDraft((d) => ({ ...d, bodyContentType: e.target.value }))}
-                    >
-                      <option value="application/json">application/json</option>
-                      <option value="application/x-www-form-urlencoded">application/x-www-form-urlencoded</option>
-                      <option value="text/plain">text/plain</option>
-                    </select>
+                    <>
+                      <label className="check-label">
+                        <input
+                          type="radio"
+                          checked={draft.bodyMode === "none"}
+                          onChange={() => setDraft((d) => ({ ...d, bodyMode: "none" }))}
+                        />
+                        none
+                      </label>
+                      <label className="check-label">
+                        <input
+                          type="radio"
+                          checked={draft.bodyMode === "raw"}
+                          onChange={() => setDraft((d) => normalizeRawBodyDraft({ ...d, bodyMode: "raw" }))}
+                        />
+                        raw
+                      </label>
+                    </>
                   )}
-                  <textarea
-                    className="workbench-body-textarea"
-                    value={draft.body}
-                    spellCheck={false}
-                    placeholder={protocol === "ws" ? "连接后点击 Send 发送此消息…" : undefined}
-                    onChange={(e) =>
-                      setDraft((d) =>
-                        protocol === "ws" ? { ...d, bodyMode: "raw", body: e.target.value } : { ...d, body: e.target.value },
-                      )
-                    }
-                  />
-                </>
+                  {(protocol === "ws" || draft.bodyMode === "raw") && (
+                    <>
+                      {protocol === "http" && (
+                        <select
+                          className="text-input workbench-content-type"
+                          value={draft.bodyContentType ?? "application/json"}
+                          onChange={(e) => setDraft((d) => ({ ...d, bodyContentType: e.target.value }))}
+                        >
+                          <option value="application/json">application/json</option>
+                          <option value="application/x-www-form-urlencoded">application/x-www-form-urlencoded</option>
+                          <option value="text/plain">text/plain</option>
+                        </select>
+                      )}
+                      <textarea
+                        className="workbench-body-textarea"
+                        value={draft.body}
+                        spellCheck={false}
+                        placeholder={protocol === "ws" ? "连接后点击 Send 发送此消息…" : undefined}
+                        onChange={(e) =>
+                          setDraft((d) =>
+                            protocol === "ws"
+                              ? { ...d, bodyMode: "raw", body: e.target.value }
+                              : { ...d, body: e.target.value },
+                          )
+                        }
+                      />
+                    </>
+                  )}
+                </div>
               )}
             </div>
-          )}
-          </div>
           </div>
 
-          {reqTab !== "perf" && (
-          <div className="workbench-editor-zone workbench-editor-zone--response workbench-response">
+          <div
+            className={`workbench-vsplit${splitDragging ? " workbench-vsplit--active" : ""}`}
+            role="separator"
+            aria-orientation="horizontal"
+            aria-label="拖动调整 Messages / Response 高度"
+            tabIndex={0}
+            onMouseDown={onResponseSplitMouseDown}
+            onKeyDown={onResponseSplitKeyDown}
+            title="拖动调整下方 Messages / Response 区域高度"
+          />
+
+          <div
+            className="workbench-editor-zone workbench-editor-zone--response workbench-response"
+            style={{ flex: `0 0 ${responsePaneHeight}px`, height: responsePaneHeight }}
+          >
             <div className="workbench-response-head">
               <span className="workbench-response-title">{protocol === "ws" ? "Messages" : "Response"}</span>
               {protocol === "http" && response && (
-                <span
-                  className={`workbench-status ${httpStatusTone(response.status, response.ok)}`}
-                >
+                <span className={`workbench-status ${httpStatusTone(response.status, response.ok)}`}>
                   {response.status || "—"} {response.statusText} · {response.durationMs} ms · {response.bodySize} B
                 </span>
               )}
@@ -1036,6 +1247,18 @@ export default function ApiWorkbench({
                 </button>
               )}
             </div>
+            {protocol === "http" && wsSwitchHint && response ? (
+              <div className="workbench-ws-hint">
+                <p>
+                  当前地址（<code>{(() => { const u = buildUrl(draft.url, draft.query); return u.length > 88 ? `${u.slice(0, 88)}…` : u; })()}</code>）含{" "}
+                  <code>/ws</code> 等特征，多为<strong> WebSocket 推送</strong>，HTTP GET 常返回{" "}
+                  {response.status}。WebSocket 行情请切到 WS 并确认证书、URL 为 <code>wss://</code>。
+                </p>
+                <button type="button" className="primary" onClick={switchToWebSocketMode}>
+                  切换为 WebSocket（wss）
+                </button>
+              </div>
+            ) : null}
             {protocol === "ws" ? (
               wsLog.length ? (
                 <pre className="workbench-response-pre workbench-ws-log">
@@ -1057,11 +1280,15 @@ export default function ApiWorkbench({
               </div>
             ) : respView === "headers" ? (
               <pre className="workbench-response-pre">{JSON.stringify(response.headers, null, 2)}</pre>
+            ) : responseImageSrc ? (
+              <div className="workbench-response-image-pane">
+                <img className="workbench-response-image" src={responseImageSrc} alt="响应图片" />
+                <p className="hint workbench-response-image-meta">{responseBodyDisplay}</p>
+              </div>
             ) : (
               <pre className="workbench-response-pre">{responseBodyDisplay || response.error || "(空响应)"}</pre>
             )}
           </div>
-          )}
         </section>
       </div>
 
@@ -1069,14 +1296,37 @@ export default function ApiWorkbench({
         open={importCurlOpen}
         onCancel={() => setImportCurlOpen(false)}
         onImport={(draft, warnings) => {
-          setImportCurlOpen(false);
-          setDraft(normalizeRawBodyDraft(draft));
-          setActiveRequestId(null);
-          setResponse(null);
-          resetWsSession();
-          if (isWsUrl(draft.url)) setProtocol("ws");
-          else setProtocol("http");
-          showToast(warnings.length ? `已导入 cURL（${warnings.join("；")}）` : "已导入 cURL");
+          void (async () => {
+            setImportCurlOpen(false);
+            let normalized = normalizeRawBodyDraft(draft);
+            const { draft: withAuth, savedKeys } = await applyImportedCurlAuth(project, envName, normalized);
+            normalized = withAuth;
+            if (savedKeys.length && project) {
+              void window.atp.getProjectVariables(project, envName).then(setVariables);
+            }
+            setDraft(normalized);
+            setActiveRequestId(null);
+            setResponse(null);
+            resetWsSession();
+            if (isWsUrl(normalized.url)) setProtocol("ws");
+            else setProtocol("http");
+            const warnPart = warnings.length ? warnings.join("；") : "";
+            if (savedKeys.length) {
+              showToast(
+                warnPart
+                  ? `已导入 cURL，${savedKeys.join("、")} 已写入 env:${envName}（*.local.yaml）· ${warnPart}`
+                  : `已导入 cURL，${savedKeys.join("、")} 已写入 env:${envName}（*.local.yaml）`,
+              );
+            } else if (!project) {
+              showToast(
+                warnPart
+                  ? `已导入 cURL；选择项目后可自动保存 token/secret 到环境 · ${warnPart}`
+                  : "已导入 cURL；选择项目后可自动保存 token/secret 到环境",
+              );
+            } else {
+              showToast(warnPart ? `已导入 cURL（${warnPart}）` : "已导入 cURL");
+            }
+          })();
         }}
       />
 
@@ -1117,29 +1367,44 @@ export default function ApiWorkbench({
         project={project}
         envName={envName}
         variableNames={collectTemplateVarNames(draft)}
-        onCancel={() => setEnvDialogOpen(false)}
+        onCancel={() => {
+          sendAfterEnvSaveRef.current = false;
+          setEnvDialogOpen(false);
+        }}
         onSaved={() => {
           setEnvDialogOpen(false);
-          void window.atp.getProjectVariables(project, envName).then(setVariables);
-          showToast("环境变量已保存");
+          void window.atp.getProjectVariables(project, envName).then((vars) => {
+            setVariables(vars);
+            showToast("环境变量已保存");
+            if (sendAfterEnvSaveRef.current) {
+              sendAfterEnvSaveRef.current = false;
+              if (unresolvedWorkbenchVars(draft, vars).length) {
+                showToast("仍有未填写的变量，请补全后再次 Send");
+                setEnvDialogOpen(true);
+                return;
+              }
+              void onSend({ varsOverride: vars, skipEnvGate: true });
+            }
+          });
         }}
       />
 
       <SaveCaseDialog
         open={saveCaseOpen}
+        defaultProjectId={project || undefined}
         defaultName={draft.name?.trim() || "api-case"}
         yamlPreview={workbenchDraftToCaseYaml(draft, response?.status)}
         onCancel={() => setSaveCaseOpen(false)}
-        onConfirm={({ caseName, addToSuite, suiteName }) => {
+        onConfirm={({ projectId, caseName, addToSuite, suiteName }) => {
           void (async () => {
             const yaml = workbenchDraftToCaseYaml(draft, response?.status);
-            const exists = await window.atp.projectCaseExists(project, caseName);
+            const exists = await window.atp.projectCaseExists(projectId, caseName);
             setSaveCaseOpen(false);
             if (exists) {
-              setPendingCaseOverwrite({ caseName, addToSuite, suiteName, yaml });
+              setPendingCaseOverwrite({ projectId, caseName, addToSuite, suiteName, yaml });
               return;
             }
-            const res = await window.atp.saveProjectCase(project, caseName, yaml, {
+            const res = await window.atp.saveProjectCase(projectId, caseName, yaml, {
               addToSuite: addToSuite ? suiteName : undefined,
             });
             if (!res.ok) {
@@ -1217,7 +1482,7 @@ export default function ApiWorkbench({
           setPendingCaseOverwrite(null);
           if (!pending) return;
           void (async () => {
-            const res = await window.atp.saveProjectCase(project, pending.caseName, pending.yaml, {
+            const res = await window.atp.saveProjectCase(pending.projectId, pending.caseName, pending.yaml, {
               addToSuite: pending.addToSuite ? pending.suiteName : undefined,
               overwrite: true,
             });

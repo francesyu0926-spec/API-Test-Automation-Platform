@@ -44,14 +44,42 @@ def _host_allowed(url: str) -> bool:
     return False
 
 
-def _decode_body(content: bytes | None) -> Any:
+def _looks_binary(data: bytes) -> bool:
+    if not data:
+        return False
+    if data[:4] in (b"GIF8", b"\x89PNG", b"RIFF") or data[:3] == b"\xff\xd8\xff":
+        return True
+    sample = data[: min(len(data), 512)]
+    control = sum(1 for b in sample if b < 9 or (13 < b < 32) or b == 127)
+    return control / max(1, len(sample)) > 0.08
+
+
+def _decode_body(content: bytes | None, content_type: str | None = None) -> Any:
     if not content:
         return None
     preview = content[:BODY_PREVIEW]
+    ct = (content_type or "").split(";")[0].strip().lower()
+    if ct.startswith("image/") or ct in ("application/octet-stream", "application/pdf") or _looks_binary(preview):
+        import base64
+
+        return {
+            "_encoding": "base64",
+            "_base64": base64.b64encode(preview).decode("ascii"),
+            "length": len(content),
+            "truncated": len(content) > BODY_PREVIEW,
+            "content_type": ct or None,
+        }
     try:
         text = preview.decode("utf-8")
     except UnicodeDecodeError:
-        return {"_base64_note": "binary body omitted", "length": len(content)}
+        import base64
+
+        return {
+            "_encoding": "base64",
+            "_base64": base64.b64encode(preview).decode("ascii"),
+            "length": len(content),
+            "truncated": len(content) > BODY_PREVIEW,
+        }
     if len(content) > BODY_PREVIEW:
         return text + "...(truncated)"
     try:
@@ -92,18 +120,20 @@ def _ingest_flow(flow: http.HTTPFlow, *, ws_payload: dict[str, Any] | None = Non
 
     req_content = flow.request.get_content()
     resp_content = flow.response.get_content() if flow.response else None
+    req_ct = flow.request.headers.get("content-type", "")
+    resp_ct = flow.response.headers.get("content-type", "") if flow.response else ""
     payload = {
         "tags": ["mitmproxy"],
         "request": {
             "method": flow.request.method,
             "url": url,
             "headers": _headers(flow.request.headers),
-            "body": _decode_body(req_content),
+            "body": _decode_body(req_content, req_ct),
         },
         "response": {
             "status": flow.response.status_code if flow.response else 0,
             "headers": _headers(flow.response.headers) if flow.response else {},
-            "body": _decode_body(resp_content),
+            "body": _decode_body(resp_content, resp_ct),
             "duration_ms": (flow.response.timestamp_end - flow.request.timestamp_start) * 1000
             if flow.response and flow.response.timestamp_end
             else None,

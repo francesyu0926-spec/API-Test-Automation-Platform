@@ -65,6 +65,8 @@ npm run electron:install
 
 打包：`npm run build`（输出在 `desktop/out/`）。
 
+桌面端模块划分、工作区与跨页面操作见 [docs/DESKTOP-UX.md](docs/DESKTOP-UX.md)。
+
 ## 目录结构
 
 ```text

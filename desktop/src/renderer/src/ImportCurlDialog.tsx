@@ -44,6 +44,8 @@ export default function ImportCurlDialog({ open, onCancel, onImport }: Props) {
         <p className="modal-message" style={{ marginBottom: 12 }}>
           粘贴从浏览器 DevTools、Postman、抓包复制的 <code>curl …</code> 命令，将解析为工作台请求（支持{" "}
           <code>-X</code>、<code>-H</code>、<code>-d</code> / <code>--data-raw</code>、换行 <code>\</code>）。
+          若含 <code>token</code> / <code>secret</code> / <code>terminalenv</code> 等头，将写入当前环境的{" "}
+          <code>*.local.yaml</code>，并改为 <code>{`{{变量}}`}</code>。
         </p>
         <textarea
           className="workbench-body-textarea import-curl-textarea"

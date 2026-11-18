@@ -1,0 +1,26 @@
+name: catesorting
+description: 由抓包生成
+request:
+  method: POST
+  url: "https://terminal.sfccn.com/terminal/desk/quotes/api/catesorting"
+  headers:
+    accept: "application/json"
+    accept-language: "zh-CN"
+    content-type: "application/json;charset=UTF-8"
+    referer: "https://terminal.sfccn.com/terminal/desk/quotes/"
+    sec-fetch-dest: "empty"
+    sec-fetch-mode: "cors"
+    sec-fetch-site: "same-origin"
+    user-agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) sfc-connect/1.0.82 Chrome/114.0.5735.289 Electron/25.8.3 Safari/537.36"
+    sec-ch-ua: "\"Not.A/Brand\";v=\"8\", \"Chromium\";v=\"114\""
+    sec-ch-ua-mobile: "?0"
+    sec-ch-ua-platform: "\"Windows\""
+    secret: "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJhdXRoMCIsImV4cCI6MTc5NTA1ODc3OSwidXNlciI6IntcImlkYWFzSWRcIjpcInVzLTQ0YTY2NDViODI3NTRkZWNiNjg5MTVhOWM0ZGU1ZDgyXCIsXCJsb2dpbkNvZGVcIjpcIjEzMjQ2ODI5ODI2XCIsXCJtZWV0aW5nWW5cIjowLFwibW9iaWxlXCI6XCIxMzI0NjgyOTgyNlwiLFwibmlja05hbWVcIjpcIuS9mei0neWKoFwiLFwic3RhdHVzXCI6NSxcInVzZXJJZFwiOjEwMDUxLFwieGN4T3BlbklkXCI6XCJvTVhnSTQ4czQ1R3ZXc2U2U1lsRUlud25pZzJrXCIsXCJ6bGJ4WW5cIjowfSJ9.NveTc59N4p03BB_VjhXDGlLkbBcfmDDekifwsAKTl-4"
+    terminalenv: "prd"
+    token: "{{token}}"
+  body: {"code":"15198D95EF92B7DEE0630100007F462D","field":"1","ascending":true,"fields":["code","name","spe","PBR","pe","amount","sellVolume","buyVolume","volumeRatio","entrustDiff","turnoverRate","orderRatio","changeRate5","changeRate10","changeRate20","yearChangeRate","openPrice","avgPrice","netCapitalInflow","nMonthChangeRate","nMonthChangeRate","amplitudeRate","nYearChangeRate","capitalization","totalValue","changeRate","threeMinRise","JSONValue","lastPrice","change","volume","preClosePrice","highPrice","lowPrice","circulatingShare","flowValue","monthChangeRate"],"pageIndex":0,"pageSize":60}
+assertions:
+  - type: status
+    equals: 200
+  - type: duration_ms
+    max: 30000
