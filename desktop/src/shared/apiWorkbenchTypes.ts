@@ -81,6 +81,22 @@ export type HttpBenchmarkStats = {
   bytesSent?: number;
 };
 
+export type PerfReportProvenance = {
+  /** JMX 绝对路径（执行当时） */
+  jmxPath?: string;
+  /** 仓库内相对路径，如 projects/{id}/jmx/foo.jmx */
+  jmxRelative?: string;
+  sourceJtl?: string;
+};
+
+/** JTL 归档中的 HTTP 采样点（按 label 聚合） */
+export type HttpBenchmarkJtlEndpoint = {
+  label: string;
+  method: string;
+  url: string;
+  samples: number;
+};
+
 export type HttpBenchmarkReport = {
   id: string;
   startedAt: string;
@@ -89,6 +105,9 @@ export type HttpBenchmarkReport = {
   stats: HttpBenchmarkStats;
   samples: HttpBenchmarkSample[];
   cancelled?: boolean;
+  provenance?: PerfReportProvenance;
+  /** 由 JTL 解析的接口列表（JMeter 批量压测归档） */
+  jtlEndpoints?: HttpBenchmarkJtlEndpoint[];
 };
 
 export type HttpSendResult = {

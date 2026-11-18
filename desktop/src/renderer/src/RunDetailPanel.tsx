@@ -1,5 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 
+import RunStepContextJson from "./RunStepContextJson";
+import RunStepResponsePreview from "./RunStepResponsePreview";
+import { formatRunAssertionParts } from "./runDetailAssertions";
+
 type RunSummaryView = {
   id?: string;
   project?: string;
@@ -23,7 +27,17 @@ type RunStep = {
     headers?: Record<string, string>;
     body_preview?: string;
   };
-  assertions?: Array<{ ok?: boolean; name?: string; message?: string; type?: string }>;
+  assertions?: Array<{
+    ok?: boolean;
+    name?: string;
+    message?: string;
+    type?: string;
+    expected?: number;
+    actual?: number;
+    max?: number;
+    text?: string;
+    error?: string;
+  }>;
 };
 
 function asSummary(raw: unknown): RunSummaryView | null {
@@ -81,31 +95,47 @@ export default function RunDetailPanel({ summary: rawSummary, steps: rawSteps, p
   const total = stats.total ?? steps.length;
   const passed = stats.passed ?? steps.filter((s) => s.status === "passed").length;
   const failed = stats.failed ?? Math.max(0, total - passed);
-  const passPct = total > 0 ? Math.round((passed / total) * 100) : 0;
-
   const projectId = summary.project ?? "";
   const projectLabel = projectId ? projectNames[projectId]?.trim() || projectId : "—";
+
+  const execTimeLabel =
+    wallMs != null && wallMs >= 60_000 ? (
+      <>
+        开始 {formatWhen(summary.started_at)}
+        <span className="run-detail-times-sep">·</span>
+        结束 {formatWhen(summary.finished_at)}
+      </>
+    ) : (
+      <>执行时间 {formatWhen(summary.finished_at ?? summary.started_at)}</>
+    );
 
   return (
     <div className="run-detail">
       <header className="run-detail-summary">
         <div className="run-detail-summary-top">
-          <span className={`badge run-detail-status run-detail-status--${statusTone(summary.status)}`}>
-            {summary.status ?? "—"}
-          </span>
-          <div className="run-detail-meta-chips">
-            <span className="run-detail-meta-chip" title={projectId ? `项目 ID：${projectId}` : "项目"}>
-              {projectLabel}
+          <div className="run-detail-summary-top-main">
+            <span className={`badge run-detail-status run-detail-status--${statusTone(summary.status)}`}>
+              {summary.status ?? "—"}
             </span>
-            <span className="run-detail-meta-chip" title="套件">
-              套件 {summary.suite}
-            </span>
-            <span className="run-detail-meta-chip" title="环境">
-              环境 {summary.environment}
-            </span>
+            <div className="run-detail-meta-chips">
+              <span className="run-detail-meta-chip" title={projectId ? `项目 ID：${projectId}` : "项目"}>
+                {projectLabel}
+              </span>
+              <span className="run-detail-meta-chip" title="套件">
+                套件 {summary.suite}
+              </span>
+              <span className="run-detail-meta-chip" title="环境">
+                环境 {summary.environment}
+              </span>
+            </div>
           </div>
+          <p className="hint run-detail-summary-time">{execTimeLabel}</p>
         </div>
-        <div className="run-detail-stats-row">
+        <div
+          className="run-detail-stats-row"
+          role="group"
+          aria-label={`步骤 ${total}，通过 ${passed}，失败 ${failed}${wallMs != null ? `，总耗时 ${(wallMs / 1000).toFixed(1)} 秒` : ""}`}
+        >
           <div className="run-detail-stat">
             <span className="run-detail-stat-value">{total}</span>
             <span className="run-detail-stat-label">步骤</span>
@@ -114,25 +144,17 @@ export default function RunDetailPanel({ summary: rawSummary, steps: rawSteps, p
             <span className="run-detail-stat-value">{passed}</span>
             <span className="run-detail-stat-label">通过</span>
           </div>
-          <div className="run-detail-stat run-detail-stat--fail">
+          <div className={`run-detail-stat run-detail-stat--fail${failed > 0 ? " run-detail-stat--warn" : ""}`}>
             <span className="run-detail-stat-value">{failed}</span>
             <span className="run-detail-stat-label">失败</span>
           </div>
           {wallMs != null ? (
-            <div className="run-detail-stat run-detail-stat--muted">
+            <div className="run-detail-stat run-detail-stat--duration">
               <span className="run-detail-stat-value">{(wallMs / 1000).toFixed(1)}s</span>
               <span className="run-detail-stat-label">总耗时</span>
             </div>
           ) : null}
         </div>
-        <div className="run-detail-progress" role="progressbar" aria-valuenow={passPct} aria-valuemin={0} aria-valuemax={100}>
-          <div className="run-detail-progress-bar" style={{ width: `${passPct}%` }} />
-        </div>
-        <p className="hint run-detail-times">
-          开始 {formatWhen(summary.started_at)}
-          <span className="run-detail-times-sep">·</span>
-          结束 {formatWhen(summary.finished_at)}
-        </p>
       </header>
 
       <section className="run-detail-steps" aria-label="步骤明细">
@@ -153,27 +175,43 @@ export default function RunDetailPanel({ summary: rawSummary, steps: rawSteps, p
                   aria-expanded={open}
                   onClick={() => setExpandedIndex(open ? null : index)}
                 >
-                  <span className="run-detail-step-index">{String(index + 1).padStart(2, "0")}</span>
-                  <span className={`badge run-detail-step-badge run-detail-step-badge--${statusTone(step.status)}`}>
-                    {step.status ?? "—"}
-                  </span>
-                  <span className="run-detail-step-case">{step.case ?? `步骤 ${index + 1}`}</span>
-                  <span
-                    className={`cases-method-pill cases-method-pill--compact cases-method-pill--${method.toLowerCase()}`}
-                  >
-                    {method}
-                  </span>
-                  {httpStatus != null ? (
-                    <span className={`run-detail-http run-detail-http--${httpStatus >= 200 && httpStatus < 300 ? "ok" : "err"}`}>
-                      {httpStatus}
+                  <div className="run-detail-step-head-row">
+                    <div className="run-detail-step-head-left">
+                      <span
+                        className={`run-detail-step-chevron${open ? " run-detail-step-chevron--open" : ""}`}
+                        aria-hidden
+                      />
+                      <span className="run-detail-step-index">{String(index + 1).padStart(2, "0")}</span>
+                      <span className="run-detail-step-case">{step.case ?? `步骤 ${index + 1}`}</span>
+                      <span className={`badge run-detail-step-badge run-detail-step-badge--${statusTone(step.status)}`}>
+                        {step.status ?? "—"}
+                      </span>
+                    </div>
+                    <div className="run-detail-step-head-meta">
+                      <span
+                        className={`run-detail-method-pill run-detail-method-pill--${method.toLowerCase()}`}
+                      >
+                        {method}
+                      </span>
+                      {httpStatus != null ? (
+                        <span
+                          className={`run-detail-status-pill run-detail-status-pill--${
+                            httpStatus >= 200 && httpStatus < 300 ? "ok" : "err"
+                          }`}
+                        >
+                          {httpStatus}
+                        </span>
+                      ) : null}
+                      {step.duration_ms != null ? (
+                        <span className="run-detail-latency-pill">{Math.round(step.duration_ms)} ms</span>
+                      ) : null}
+                    </div>
+                  </div>
+                  {url ? (
+                    <span className="run-detail-step-url-line" title={url}>
+                      {url}
                     </span>
                   ) : null}
-                  {step.duration_ms != null ? (
-                    <span className="run-detail-duration">{Math.round(step.duration_ms)} ms</span>
-                  ) : null}
-                  <span className="run-detail-step-url" title={url}>
-                    {url}
-                  </span>
                 </button>
                 {open ? (
                   <div className="run-detail-step-body">
@@ -181,16 +219,38 @@ export default function RunDetailPanel({ summary: rawSummary, steps: rawSteps, p
                       <div className="run-detail-block">
                         <h4 className="run-detail-block-title">断言</h4>
                         <ul className="run-detail-assertions">
-                          {(step.assertions ?? []).map((a, ai) => (
-                            <li
-                              key={ai}
-                              className={`run-detail-assertion${a.ok ? " run-detail-assertion--ok" : " run-detail-assertion--fail"}`}
-                            >
-                              <span className="run-detail-assertion-mark">{a.ok ? "✓" : "✗"}</span>
-                              <span>{a.name ?? a.type ?? "断言"}</span>
-                              {a.message ? <span className="hint"> — {a.message}</span> : null}
-                            </li>
-                          ))}
+                          {(step.assertions ?? []).map((a, ai) => {
+                            const { key, parts } = formatRunAssertionParts(a);
+                            return (
+                              <li
+                                key={ai}
+                                className={`run-detail-assertion${a.ok ? " run-detail-assertion--ok" : " run-detail-assertion--fail"}`}
+                              >
+                                <span className="run-detail-assertion-mark">{a.ok ? "✓" : "✗"}</span>
+                                <span className="run-detail-assertion-line">
+                                  <span className="run-detail-assertion-key">{key}</span>
+                                  {parts.length > 0 ? (
+                                    <span
+                                      className={`run-detail-assertion-expr${
+                                        a.ok ? "" : " run-detail-assertion-expr--fail"
+                                      }`}
+                                    >
+                                      :{" "}
+                                      {parts.map((p, pi) =>
+                                        p.kind === "actual" ? (
+                                          <span key={pi} className="run-detail-assertion-val">
+                                            {p.text}
+                                          </span>
+                                        ) : (
+                                          <span key={pi}>{p.text}</span>
+                                        ),
+                                      )}
+                                    </span>
+                                  ) : null}
+                                </span>
+                              </li>
+                            );
+                          })}
                         </ul>
                       </div>
                     ) : null}
@@ -200,13 +260,10 @@ export default function RunDetailPanel({ summary: rawSummary, steps: rawSteps, p
                     {step.response?.body_preview ? (
                       <div className="run-detail-block">
                         <h4 className="run-detail-block-title">响应预览</h4>
-                        <pre className="run-detail-body-preview">{step.response.body_preview}</pre>
+                        <RunStepResponsePreview bodyPreview={step.response.body_preview} />
                       </div>
                     ) : null}
-                    <details className="run-detail-raw">
-                      <summary>原始 JSON</summary>
-                      <pre className="run-detail-raw-pre">{JSON.stringify(step, null, 2)}</pre>
-                    </details>
+                    <RunStepContextJson step={step as Record<string, unknown>} />
                   </div>
                 ) : null}
               </li>

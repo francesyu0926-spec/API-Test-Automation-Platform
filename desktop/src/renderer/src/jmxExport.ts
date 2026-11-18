@@ -14,6 +14,8 @@ export type JmxExportOptions = {
   /** 注入 environments/{env}.yaml 与 *.local.yaml 中的 token / secret 等 */
   envName: string;
   injectEnv: boolean;
+  /** 默认 true；压测配置导出的 JMX 不含 JMeter「聚合报告」监听器 */
+  includeAggregateListener?: boolean;
 };
 
 const JMETER_ENV_KEYS = ["token", "secret", "terminalenv", "access_token", "base_url"] as const;

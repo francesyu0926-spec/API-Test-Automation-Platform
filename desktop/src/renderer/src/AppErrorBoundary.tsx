@@ -16,11 +16,22 @@ export default class AppErrorBoundary extends Component<Props, State> {
 
   render() {
     if (this.state.error) {
+      const preloadHint =
+        !window.atp &&
+        "未检测到 window.atp：请关闭本页，在 desktop 目录运行 npm run dev，使用弹出的 Electron 窗口（不要用浏览器打开 localhost）。";
       return (
         <div className="app-error-fallback">
           <h1>界面加载失败</h1>
           <p>{this.state.error.message}</p>
-          <button type="button" className="primary" onClick={() => this.setState({ error: null })}>
+          {preloadHint ? <p className="hint">{preloadHint}</p> : null}
+          <button
+            type="button"
+            className="primary"
+            onClick={() => {
+              if (!window.atp) window.location.reload();
+              else this.setState({ error: null });
+            }}
+          >
             重试
           </button>
         </div>

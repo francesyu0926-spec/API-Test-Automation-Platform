@@ -6,6 +6,7 @@ import {
   rowFromReport,
   summarizeBenchmarkErrors,
 } from "./aggregateReportTable";
+import { formatPerfStartedAtLocal } from "./perfDateTime";
 
 function percentile(sorted: number[], p: number): number {
   if (!sorted.length) return 0;
@@ -25,7 +26,7 @@ export function endpointKey(report: HttpBenchmarkReport): string {
 
 export function reportRowLabel(report: HttpBenchmarkReport): string {
   const base = report.request.name?.trim() || report.request.url;
-  const t = report.startedAt.replace("T", " ").slice(0, 19);
+  const t = formatPerfStartedAtLocal(report.startedAt);
   return `${base} · ${t}`;
 }
 

@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from "react";
+
+import AppCustomSelect from "./AppCustomSelect";
+import {
+  jmeterLogLineClass,
+  jmeterVersionLabel,
+  suggestJmeterOutputDir,
+} from "./jmeterConsoleLog";
+import { saveBytesWithDialog } from "./saveBytesWithDialog";
 
 const DEFAULT_JMX_HINT =
   "D:\\Document\\LAB\\stockmarket_20260920\\jmeter\\行情接口 v2.jmx";
@@ -7,23 +15,43 @@ type Props = {
   project: string;
   onToast: (msg: string) => void;
   onRunFinished?: (payload: { jtlPath: string; reportDir?: string; jmxPath: string }) => void;
+  /** 压测配置生成后预填路径 */
+  initialJmxPath?: string;
+  initialOutputDir?: string;
+  /** 变化时自动执行（与 initialJmxPath 一并下发） */
+  autoRunKey?: number;
+  fromLoadTestConfig?: boolean;
 };
 
-export default function JmeterRunPanel({ project, onToast, onRunFinished }: Props) {
+export default function JmeterRunPanel({
+  project,
+  onToast,
+  onRunFinished,
+  initialJmxPath,
+  initialOutputDir,
+  autoRunKey,
+  fromLoadTestConfig,
+}: Props) {
   const [jmxPath, setJmxPath] = useState("");
   const [outputDir, setOutputDir] = useState("");
   const [jmeterHome, setJmeterHome] = useState("");
   const [jmeterOk, setJmeterOk] = useState<boolean | null>(null);
   const [generateReport, setGenerateReport] = useState(true);
   const [copyToProject, setCopyToProject] = useState(false);
+  const [jvmArgs, setJvmArgs] = useState("");
+  const [advancedOpen, setAdvancedOpen] = useState(false);
   const [running, setRunning] = useState(false);
   const [log, setLog] = useState("");
+  const [autoScrollLog, setAutoScrollLog] = useState(true);
+  const [projectJmxFiles, setProjectJmxFiles] = useState<string[]>([]);
+  const [projectJmxPick, setProjectJmxPick] = useState("");
   const [lastRun, setLastRun] = useState<{
     jtlPath: string;
     reportDir?: string;
     outputDir: string;
   } | null>(null);
-  const logRef = useRef<HTMLPreElement>(null);
+  const logRef = useRef<HTMLDivElement>(null);
+  const jmxDropDepth = useRef(0);
 
   useEffect(() => {
     const off = window.atp.onJmeterLog(({ text }) => {
@@ -33,21 +61,61 @@ export default function JmeterRunPanel({ project, onToast, onRunFinished }: Prop
   }, []);
 
   useEffect(() => {
+    if (!autoScrollLog) return;
     const el = logRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [log, running]);
+  }, [log, running, autoScrollLog]);
 
   const refreshJmeter = useCallback(async () => {
     const res = await window.atp.detectJmeter(jmeterHome.trim() || undefined);
     setJmeterOk(res.found);
-    if (res.found && res.jmeterHome && !jmeterHome.trim()) {
+    if (res.found && res.jmeterHome) {
       setJmeterHome(res.jmeterHome);
     }
   }, [jmeterHome]);
 
+  const onAutoDetectJmeter = useCallback(async () => {
+    setJmeterOk(null);
+    const res = await window.atp.detectJmeter(undefined);
+    setJmeterOk(res.found);
+    if (res.found && res.jmeterHome) {
+      setJmeterHome(res.jmeterHome);
+      onToast(`已自动检测到 JMeter：${res.jmeterHome}`);
+    } else {
+      onToast(res.error ?? "未找到 JMeter，请手动选择安装目录");
+    }
+  }, [onToast]);
+
   useEffect(() => {
     void refreshJmeter();
   }, [refreshJmeter]);
+
+  useEffect(() => {
+    if (!project) {
+      setProjectJmxFiles([]);
+      return;
+    }
+    void window.atp.listProjectJmxFiles(project).then((files) => {
+      const sorted = [...files].sort((a, b) => b.localeCompare(a));
+      setProjectJmxFiles(sorted);
+    });
+  }, [project]);
+
+  const applyJmxPath = useCallback((filePath: string, fillOutput = true) => {
+    setJmxPath(filePath);
+    setProjectJmxPick("");
+    if (fillOutput) {
+      setOutputDir((prev) => (prev.trim() ? prev : suggestJmeterOutputDir(filePath)));
+    }
+  }, []);
+
+  useEffect(() => {
+    if (initialJmxPath?.trim()) applyJmxPath(initialJmxPath.trim(), false);
+  }, [initialJmxPath, applyJmxPath]);
+
+  useEffect(() => {
+    if (initialOutputDir?.trim()) setOutputDir(initialOutputDir.trim());
+  }, [initialOutputDir]);
 
   const onBrowseJmx = async () => {
     const picked = await window.atp.pickOpenFile({
@@ -55,11 +123,19 @@ export default function JmeterRunPanel({ project, onToast, onRunFinished }: Prop
       filters: [{ name: "JMeter 测试计划", extensions: ["jmx"] }],
     });
     if (picked.cancelled || !picked.filePath) return;
-    setJmxPath(picked.filePath);
-    if (!outputDir.trim()) {
-      const dir = picked.filePath.replace(/[\\/][^\\/]+$/, "");
-      setOutputDir(`${dir}\\run_${new Date().toISOString().slice(0, 10).replace(/-/g, "")}`);
-    }
+    applyJmxPath(picked.filePath);
+  };
+
+  const onBrowseJmeterHome = async () => {
+    const picked = await window.atp.pickOpenDirectory({
+      defaultPath: jmeterHome.trim() || undefined,
+      title: "选择 JMeter 安装目录（JMETER_HOME）",
+    });
+    if (picked.cancelled || !picked.dirPath) return;
+    setJmeterHome(picked.dirPath);
+    const res = await window.atp.detectJmeter(picked.dirPath);
+    setJmeterOk(res.found);
+    if (!res.found) onToast(res.error ?? "该目录不是有效的 JMeter 安装");
   };
 
   const onBrowseOutputDir = async () => {
@@ -74,6 +150,43 @@ export default function JmeterRunPanel({ project, onToast, onRunFinished }: Prop
     setOutputDir(picked.dirPath);
   };
 
+  const onPickProjectJmx = (absPath: string) => {
+    if (!absPath) return;
+    setProjectJmxPick(absPath);
+    applyJmxPath(absPath);
+  };
+
+  const onJmxDragEnter = (e: DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    jmxDropDepth.current += 1;
+  };
+
+  const onJmxDragLeave = (e: DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    jmxDropDepth.current -= 1;
+  };
+
+  const onJmxDragOver = (e: DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    e.dataTransfer.dropEffect = "copy";
+  };
+
+  const onJmxDrop = (e: DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    jmxDropDepth.current = 0;
+    const file = e.dataTransfer.files[0] as File & { path?: string };
+    const filePath = file?.path ?? "";
+    if (!filePath.toLowerCase().endsWith(".jmx")) {
+      onToast("请拖入 .jmx 文件");
+      return;
+    }
+    applyJmxPath(filePath);
+  };
+
   const copyJmxToProject = async (absPath: string) => {
     if (!project || !copyToProject) return;
     const text = await window.atp.readAbsoluteFile(absPath);
@@ -82,54 +195,135 @@ export default function JmeterRunPanel({ project, onToast, onRunFinished }: Prop
     const rel = `projects/${project}/jmx/${base}.jmx`;
     await window.atp.writeRepoFile(rel, text);
     onToast(`JMX 副本已写入 ${rel}`);
+    const list = await window.atp.listProjectJmxFiles(project);
+    setProjectJmxFiles([...list].sort((a, b) => b.localeCompare(a)));
   };
 
-  const onRun = async () => {
-    if (!jmxPath.trim()) {
-      onToast("请选择 .jmx 文件");
-      return;
-    }
-    if (jmeterOk === false) {
-      onToast("未检测到 JMeter，请设置 JMETER_HOME 或填写安装目录");
-      return;
-    }
-    setRunning(true);
-    setLog("");
-    setLastRun(null);
-    try {
-      if (copyToProject) await copyJmxToProject(jmxPath.trim());
-      const res = await window.atp.runJmeter({
-        jmxPath: jmxPath.trim(),
-        outputDir: outputDir.trim() || undefined,
-        jmeterHome: jmeterHome.trim() || undefined,
-        generateReport,
-      });
-      if (res.cancelled) {
-        onToast("已手动停止 JMeter");
+  const executeJmx = useCallback(
+    async (paths?: { jmx?: string; outDir?: string }) => {
+      const jmxFile = (paths?.jmx ?? jmxPath).trim();
+      const outDir = (paths?.outDir ?? outputDir).trim();
+      if (!jmxFile) {
+        onToast("请选择 .jmx 文件");
         return;
       }
-      if (!res.ok) {
-        const msg = res.error ?? `JMeter 失败（退出码 ${res.exitCode ?? "?"}）`;
-        onToast(msg.length > 120 ? `${msg.slice(0, 117)}…` : msg);
+      if (jmeterOk === false) {
+        onToast("未检测到 JMeter，请设置 JMETER_HOME 或点「自动检测」");
         return;
       }
-      setLastRun({ jtlPath: res.jtlPath, reportDir: res.reportDir, outputDir: res.outputDir });
-      onToast(`压测完成：${res.jtlPath}`);
-      onRunFinished?.({ jtlPath: res.jtlPath, reportDir: res.reportDir, jmxPath: res.jmxPath });
-    } catch (e) {
-      onToast(e instanceof Error ? e.message : "执行失败");
-    } finally {
-      setRunning(false);
-    }
-  };
+      if (paths?.jmx) setJmxPath(jmxFile);
+      if (paths?.outDir) setOutputDir(outDir);
+      setRunning(true);
+      setLog("");
+      setLastRun(null);
+      try {
+        if (copyToProject) await copyJmxToProject(jmxFile);
+        const res = await window.atp.runJmeter({
+          jmxPath: jmxFile,
+          outputDir: outDir || undefined,
+          jmeterHome: jmeterHome.trim() || undefined,
+          generateReport,
+          jvmArgs: jvmArgs.trim() || undefined,
+        });
+        if (res.cancelled) {
+          onToast("已手动停止 JMeter");
+          return;
+        }
+        if (!res.ok) {
+          const msg = res.error ?? `JMeter 失败（退出码 ${res.exitCode ?? "?"}）`;
+          onToast(msg.length > 120 ? `${msg.slice(0, 117)}…` : msg);
+          return;
+        }
+        setLastRun({ jtlPath: res.jtlPath, reportDir: res.reportDir, outputDir: res.outputDir });
+        onToast(`压测完成：${res.jtlPath}`);
+        onRunFinished?.({ jtlPath: res.jtlPath, reportDir: res.reportDir, jmxPath: res.jmxPath });
+      } catch (e) {
+        onToast(e instanceof Error ? e.message : "执行失败");
+      } finally {
+        setRunning(false);
+      }
+    },
+    [
+      copyToProject,
+      generateReport,
+      jmeterHome,
+      jmeterOk,
+      jmxPath,
+      jvmArgs,
+      onRunFinished,
+      onToast,
+      outputDir,
+      project,
+    ],
+  );
+
+  const onRun = () => void executeJmx();
+
+  const autoRunKeyRef = useRef(0);
+
+  useEffect(() => {
+    if (!autoRunKey || !initialJmxPath?.trim()) return;
+    if (autoRunKeyRef.current === autoRunKey) return;
+    if (jmeterOk === null) return;
+    autoRunKeyRef.current = autoRunKey;
+    const jmxFile = initialJmxPath.trim();
+    const outDir = initialOutputDir?.trim() ?? "";
+    setJmxPath(jmxFile);
+    if (outDir) setOutputDir(outDir);
+    const delay = jmeterOk === false ? 0 : 120;
+    const id = window.setTimeout(() => void executeJmx({ jmx: jmxFile, outDir }), delay);
+    return () => window.clearTimeout(id);
+  }, [autoRunKey, initialJmxPath, initialOutputDir, jmeterOk, executeJmx]);
 
   const onStop = () => {
     void window.atp.cancelJmeter();
     onToast("正在停止 JMeter…");
   };
 
+  const jmeterVersion = useMemo(() => {
+    const home = jmeterHome.trim();
+    if (!home || !jmeterOk) return null;
+    return jmeterVersionLabel(home);
+  }, [jmeterHome, jmeterOk]);
+
+  const clearLog = () => setLog("");
+
+  const exportLog = async () => {
+    const text = log.trim();
+    if (!text) {
+      onToast("暂无日志可导出");
+      return;
+    }
+    const base64 = btoa(unescape(encodeURIComponent(text)));
+    const res = await saveBytesWithDialog({
+      defaultPath: `jmeter-console-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-")}.log`,
+      base64,
+      filters: [{ name: "日志", extensions: ["log", "txt"] }],
+    });
+    if (res.ok) onToast(`已导出 ${res.filePath ?? "日志"}`);
+    else if (!res.cancelled && res.error) onToast(res.error);
+  };
+
+  const logIsEmpty = !log.trim() && !running;
+  const logLines = useMemo(() => (logIsEmpty ? [] : log.split(/\r?\n/)), [log, logIsEmpty]);
+
+  const projectJmxOptions = useMemo(
+    () =>
+      projectJmxFiles.map((abs) => {
+        const name = abs.replace(/^.*[\\/]/, "");
+        return { value: abs, label: name, title: abs };
+      }),
+    [projectJmxFiles],
+  );
+
   return (
     <div className="loadtest-jmeter-run-shell">
+      {fromLoadTestConfig ? (
+        <p className="loadtest-jmeter-run-from-config hint">
+          已由「压测配置」生成测试计划并载入下方路径；执行方式与手动导入 JMX 相同。
+        </p>
+      ) : null}
+
       <header className="loadtest-jmeter-run-head">
         <div>
           <h3 className="loadtest-jmeter-run-title">导入并执行 JMX</h3>
@@ -138,77 +332,161 @@ export default function JmeterRunPanel({ project, onToast, onRunFinished }: Prop
             {generateReport ? " 与 report/" : ""}。
           </p>
         </div>
-        <div className="loadtest-jmeter-run-status">
-          {jmeterOk === true ? (
-            <span className="loadtest-jmeter-run-ok">JMeter 可用</span>
-          ) : jmeterOk === false ? (
-            <span className="loadtest-jmeter-run-warn">未检测到 JMeter</span>
-          ) : (
-            <span className="hint">检测中…</span>
-          )}
-          <button type="button" className="nav-btn nav-btn--compact" onClick={() => void refreshJmeter()}>
-            重新检测
-          </button>
-        </div>
       </header>
 
-      <div className="loadtest-jmeter-run-grid">
-        <section className="loadtest-jmeter-run-block" aria-labelledby="jmeter-env-heading">
-          <h4 id="jmeter-env-heading" className="loadtest-jmeter-run-block-title">
-            环境
-          </h4>
-          <label className="loadtest-field loadtest-jmeter-run-field">
-            <span>JMETER_HOME</span>
-            <input
-              className="text-input"
-              value={jmeterHome}
-              placeholder="C:\apache-jmeter-5.5"
-              spellCheck={false}
-              onChange={(e) => setJmeterHome(e.target.value)}
-            />
-          </label>
-        </section>
+      <div className="loadtest-jmeter-env-banner" aria-label="JMeter 环境">
+        <span className="loadtest-jmeter-env-banner-label">JMETER_HOME</span>
+        <div className="jmeter-input-group loadtest-jmeter-env-banner-input">
+          <input
+            className="text-input jmeter-input-group-control"
+            value={jmeterHome}
+            placeholder="C:\apache-jmeter-5.5"
+            spellCheck={false}
+            onChange={(e) => setJmeterHome(e.target.value)}
+            onBlur={() => void refreshJmeter()}
+          />
+          <button
+            type="button"
+            className="jmeter-input-group-btn"
+            title="浏览安装目录"
+            aria-label="浏览 JMeter 目录"
+            onClick={() => void onBrowseJmeterHome()}
+          >
+            📂
+          </button>
+        </div>
+        <div className="loadtest-jmeter-env-actions">
+          <button type="button" className="nav-btn nav-btn--compact" onClick={() => void onAutoDetectJmeter()}>
+            自动检测
+          </button>
+          <button
+            type="button"
+            className="workbench-icon-btn workbench-icon-btn--tiny"
+            title="重新检测当前目录"
+            aria-label="重新检测"
+            onClick={() => void refreshJmeter()}
+          >
+            ↻
+          </button>
+          {jmeterOk === true ? (
+            <span className="loadtest-jmeter-ready-inline" title={jmeterHome} role="status">
+              <span className="loadtest-jmeter-ready-dot loadtest-jmeter-ready-dot--ok" aria-hidden />
+              已就绪{jmeterVersion ? ` v${jmeterVersion}` : ""}
+            </span>
+          ) : jmeterOk === false ? (
+            <span className="loadtest-jmeter-ready-inline loadtest-jmeter-ready-inline--bad" role="status">
+              <span className="loadtest-jmeter-ready-dot loadtest-jmeter-ready-dot--bad" aria-hidden />
+              未检测到
+            </span>
+          ) : (
+            <span className="hint loadtest-jmeter-run-detecting" role="status">
+              检测中…
+            </span>
+          )}
+        </div>
+      </div>
 
-        <section className="loadtest-jmeter-run-block" aria-labelledby="jmeter-plan-heading">
+      <div className="loadtest-jmeter-run-grid loadtest-jmeter-run-grid--v2">
+        <section className="loadtest-jmeter-run-block loadtest-jmeter-run-block--plan" aria-labelledby="jmeter-plan-heading">
           <h4 id="jmeter-plan-heading" className="loadtest-jmeter-run-block-title">
-            计划与输出
+            测试计划与输出
           </h4>
+
+          {project && projectJmxOptions.length > 0 ? (
+            <label className="loadtest-field loadtest-jmeter-run-field">
+              <span>项目内 JMX</span>
+              <AppCustomSelect
+                className="loadtest-jmeter-project-jmx-select"
+                value={projectJmxPick}
+                ariaLabel="选择项目内已保存的 JMX"
+                placeholder="近期平台生成的 JMX…"
+                options={[{ value: "", label: "手动选择或输入路径…" }, ...projectJmxOptions]}
+                onChange={(v) => {
+                  if (!v) {
+                    setProjectJmxPick("");
+                    return;
+                  }
+                  onPickProjectJmx(v);
+                }}
+              />
+            </label>
+          ) : null}
+
           <label className="loadtest-field loadtest-jmeter-run-field">
-            <span>测试计划 (.jmx)</span>
-            <div className="loadtest-jtl-path-row">
+            <span>.jmx 文件（可拖入）</span>
+            <div
+              className="jmeter-input-group loadtest-jmeter-jmx-drop"
+              onDragEnter={onJmxDragEnter}
+              onDragLeave={onJmxDragLeave}
+              onDragOver={onJmxDragOver}
+              onDrop={onJmxDrop}
+            >
               <input
-                className="text-input loadtest-jtl-path"
+                className="text-input jmeter-input-group-control"
                 value={jmxPath}
                 placeholder={DEFAULT_JMX_HINT}
                 spellCheck={false}
                 onChange={(e) => setJmxPath(e.target.value)}
               />
-              <button type="button" className="nav-btn" onClick={() => void onBrowseJmx()}>
-                浏览…
+              <button
+                type="button"
+                className="jmeter-input-group-btn"
+                title="浏览 JMX 文件"
+                aria-label="浏览 JMX 文件"
+                onClick={() => void onBrowseJmx()}
+              >
+                📂
               </button>
             </div>
           </label>
           <label className="loadtest-field loadtest-jmeter-run-field">
             <span>输出目录（可选）</span>
-            <div className="loadtest-jtl-path-row">
+            <div className="jmeter-input-group">
               <input
-                className="text-input loadtest-jtl-path"
+                className="text-input jmeter-input-group-control"
                 value={outputDir}
-                placeholder="默认在 JMX 同级创建 run_时间戳"
+                placeholder="选择 JMX 后自动建议 run_时间戳"
                 spellCheck={false}
                 onChange={(e) => setOutputDir(e.target.value)}
               />
-              <button type="button" className="nav-btn" onClick={() => void onBrowseOutputDir()}>
-                选择文件夹…
+              <button
+                type="button"
+                className="jmeter-input-group-btn"
+                title="选择输出文件夹"
+                aria-label="选择输出文件夹"
+                onClick={() => void onBrowseOutputDir()}
+              >
+                📂
               </button>
             </div>
           </label>
+
+          <details
+            className="loadtest-jmeter-advanced"
+            open={advancedOpen}
+            onToggle={(e) => setAdvancedOpen((e.target as HTMLDetailsElement).open)}
+          >
+            <summary className="loadtest-jmeter-advanced-summary">高级参数</summary>
+            <label className="loadtest-field loadtest-jmeter-run-field">
+              <span>JVM_ARGS</span>
+              <input
+                className="text-input"
+                value={jvmArgs}
+                placeholder="-Xms512m -Xmx2g"
+                spellCheck={false}
+                onChange={(e) => setJvmArgs(e.target.value)}
+              />
+              <p className="hint loadtest-jmeter-advanced-hint">写入 JMeter 启动环境的 JVM_ARGS（如堆内存）。</p>
+            </label>
+          </details>
         </section>
 
-        <aside className="loadtest-jmeter-run-block loadtest-jmeter-run-block--actions">
-          <h4 className="loadtest-jmeter-run-block-title">执行</h4>
+        <aside className="loadtest-jmeter-run-block loadtest-jmeter-run-block--actions" aria-labelledby="jmeter-run-heading">
+          <h4 id="jmeter-run-heading" className="loadtest-jmeter-run-block-title">
+            执行
+          </h4>
           <div className="loadtest-jmeter-run-checks">
-            <label className="check-label">
+            <label className="check-label loadtest-jmeter-check">
               <input
                 type="checkbox"
                 checked={generateReport}
@@ -216,7 +494,7 @@ export default function JmeterRunPanel({ project, onToast, onRunFinished }: Prop
               />
               生成 HTML 报告
             </label>
-            <label className="check-label">
+            <label className="check-label loadtest-jmeter-check">
               <input
                 type="checkbox"
                 checked={copyToProject}
@@ -235,62 +513,99 @@ export default function JmeterRunPanel({ project, onToast, onRunFinished }: Prop
             >
               {running ? "JMeter 运行中…" : "执行 JMX"}
             </button>
-            <button type="button" className="nav-btn" disabled={!running} onClick={onStop}>
-              停止
-            </button>
-          </div>
-
-          {lastRun ? (
-            <div className="loadtest-jmeter-run-result">
-              <p className="loadtest-jmeter-run-result-line">
-                <span className="loadtest-jmeter-run-result-label">JTL</span>
-                <code title={lastRun.jtlPath}>{lastRun.jtlPath}</code>
-              </p>
-              {lastRun.reportDir ? (
+            {running ? (
+              <button type="button" className="loadtest-jmeter-stop-btn" onClick={onStop}>
+                停止
+              </button>
+            ) : null}
+            {lastRun ? (
+              <div className="loadtest-jmeter-run-result">
                 <p className="loadtest-jmeter-run-result-line">
-                  <span className="loadtest-jmeter-run-result-label">Report</span>
-                  <code title={lastRun.reportDir}>{lastRun.reportDir}</code>
+                  <span className="loadtest-jmeter-run-result-label">JTL</span>
+                  <code title={lastRun.jtlPath}>{lastRun.jtlPath}</code>
                 </p>
-              ) : null}
-              <div className="loadtest-jmeter-run-result-actions">
-                <button
-                  type="button"
-                  className="nav-btn nav-btn--compact"
-                  onClick={() => void window.atp.openPath(lastRun.outputDir)}
-                >
-                  输出文件夹
-                </button>
                 {lastRun.reportDir ? (
+                  <p className="loadtest-jmeter-run-result-line">
+                    <span className="loadtest-jmeter-run-result-label">Report</span>
+                    <code title={lastRun.reportDir}>{lastRun.reportDir}</code>
+                  </p>
+                ) : null}
+                <div className="loadtest-jmeter-run-result-actions">
                   <button
                     type="button"
                     className="nav-btn nav-btn--compact"
-                    onClick={() => void window.atp.openPath(lastRun.reportDir!)}
+                    onClick={() => void window.atp.openPath(lastRun.outputDir)}
                   >
-                    report
+                    打开所在目录
                   </button>
-                ) : null}
+                  {lastRun.reportDir ? (
+                    <button
+                      type="button"
+                      className="nav-btn nav-btn--compact"
+                      onClick={() => void window.atp.openPath(lastRun.reportDir!)}
+                    >
+                      HTML 报告
+                    </button>
+                  ) : null}
+                </div>
               </div>
-            </div>
-          ) : (
-            <p className="hint loadtest-jmeter-run-actions-hint">选择 .jmx 后点「执行 JMX」，日志在下方实时显示。</p>
-          )}
+            ) : (
+              <p className="hint loadtest-jmeter-run-actions-hint">选择 .jmx 后点「执行 JMX」，日志在下方实时显示。</p>
+            )}
+          </div>
         </aside>
       </div>
 
-      <section className="loadtest-jmeter-run-log-section" aria-label="运行日志">
-        <div className="loadtest-jmeter-run-log-head">
-          <span className="sub-title">运行日志</span>
-          <span className="hint">
-            {running ? "实时输出 · jmeter.log" : log ? "已完成" : "执行后显示"}
-          </span>
+      <section className="loadtest-jmeter-console" aria-label="运行日志">
+        <div className="loadtest-jmeter-console-toolbar">
+          <span className="loadtest-jmeter-console-title">Console Output</span>
+          <div className="loadtest-jmeter-console-actions">
+            <label className="loadtest-jmeter-console-autoscroll check-label">
+              <input
+                type="checkbox"
+                checked={autoScrollLog}
+                onChange={(e) => setAutoScrollLog(e.target.checked)}
+              />
+              自动滚动到底部
+            </label>
+            <button
+              type="button"
+              className="nav-btn nav-btn--compact nav-btn--ghost"
+              disabled={!log.trim()}
+              onClick={clearLog}
+            >
+              清空日志
+            </button>
+            <button
+              type="button"
+              className="nav-btn nav-btn--compact nav-btn--ghost"
+              disabled={!log.trim()}
+              onClick={() => void exportLog()}
+            >
+              导出日志
+            </button>
+          </div>
         </div>
-        <pre
+        <div
           ref={logRef}
-          className={`loadtest-jmeter-run-log${running ? " loadtest-jmeter-run-log--live" : ""}`}
+          className={`loadtest-jmeter-run-log${running ? " loadtest-jmeter-run-log--live" : ""}${
+            logIsEmpty ? " loadtest-jmeter-run-log--idle" : ""
+          }`}
           aria-live="polite"
         >
-          {log || (running ? "等待 JMeter 输出…" : "（尚未执行）")}
-        </pre>
+          {logIsEmpty ? (
+            <span className="loadtest-jmeter-run-log-empty">
+              &gt; Waiting for execution…
+              <span className="loadtest-console-cursor" aria-hidden />
+            </span>
+          ) : (
+            logLines.map((line, i) => (
+              <div key={i} className={jmeterLogLineClass(line)}>
+                {line || "\u00a0"}
+              </div>
+            ))
+          )}
+        </div>
       </section>
     </div>
   );

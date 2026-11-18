@@ -1,5 +1,6 @@
 import type { HttpBenchmarkReport, HttpBenchmarkSample, WorkbenchDraft } from "../../shared/apiWorkbenchTypes";
 import type { JtlSample } from "../../shared/jtl";
+import { jtlSampleErrorMessage } from "../../shared/jtlTextRepair";
 import { inferHttpMethodFromLabel, pathHintFromLabel } from "../../shared/jtl";
 import { buildJmeterStatistics, globalWallMs, type JmeterStatRow } from "../../shared/jmeterStatistics";
 import type { AggregateReportRow } from "./aggregateReportTable";
@@ -138,7 +139,7 @@ function jtlSamplesToBenchmarkSamples(rows: JtlSample[]): HttpBenchmarkSample[] 
     status: Number(s.responseCode) || 0,
     durationMs: s.elapsed,
     bodySize: s.bytes,
-    error: s.success ? undefined : s.responseMessage || `HTTP ${s.responseCode}`,
+    error: s.success ? undefined : jtlSampleErrorMessage(s),
   }));
 }
 
@@ -206,9 +207,13 @@ export function jtlToBenchmarkReports(samples: JtlSample[], _sourceFile: string)
 const JTL_ARCHIVE_SAMPLE_CAP = 800;
 
 /** 单次 JMX 运行：合并为一条 HttpBenchmarkReport 写入压测历史 */
+function basenamePath(p: string): string {
+  return p.replace(/^.*[\\/]/, "");
+}
+
 export function jtlToRunBenchmarkReport(
   samples: JtlSample[],
-  meta: { sourceJtl: string; jmxPath?: string },
+  meta: { sourceJtl: string; jmxPath?: string; projectId?: string },
 ): HttpBenchmarkReport | null {
   const http = jtlHttpSamples(samples);
   if (!http.length) return null;
@@ -271,6 +276,14 @@ export function jtlToRunBenchmarkReport(
     },
     samples: storedSamples,
     cancelled: false,
+    provenance: {
+      sourceJtl: meta.sourceJtl,
+      jmxPath: meta.jmxPath,
+      jmxRelative:
+        meta.jmxPath && meta.projectId
+          ? `projects/${meta.projectId}/jmx/${basenamePath(meta.jmxPath)}`
+          : undefined,
+    },
   };
 }
 
@@ -279,9 +292,7 @@ export function jtlErrorSummary(samples: JtlSample[]): Array<{ message: string; 
   const map = new Map<string, number>();
   for (const s of http) {
     if (s.success) continue;
-    const msg =
-      s.responseMessage?.trim() ||
-      (s.responseCode ? `HTTP ${s.responseCode}` : "请求失败");
+    const msg = jtlSampleErrorMessage(s);
     map.set(msg, (map.get(msg) ?? 0) + 1);
   }
   return [...map.entries()]

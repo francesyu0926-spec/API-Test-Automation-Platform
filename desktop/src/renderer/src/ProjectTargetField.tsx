@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import CreateProjectDialog from "./CreateProjectDialog";
+import AppCustomSelect from "./AppCustomSelect";
 
 type ProjectRow = { id: string; name: string };
 

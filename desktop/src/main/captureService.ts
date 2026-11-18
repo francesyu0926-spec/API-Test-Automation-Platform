@@ -487,6 +487,41 @@ export function getMitmStatus(): { running: boolean; listenPort?: number; proxy?
   return { running: true, listenPort, proxy: `${listenHost}:${listenPort}` };
 }
 
+function trimMitmStderr(stderr: string, max = 900): string {
+  const s = stderr.trim().replace(/\r\n/g, "\n");
+  if (!s) return "";
+  return s.length > max ? `…${s.slice(-max)}` : s;
+}
+
+function mitmManualCommand(binary: string, root: string, listenPort: number): string {
+  const addon = path.join(root, "scripts", "mitm_ingest_addon.py");
+  const q = (p: string) => `"${p}"`;
+  return `${q(binary)} -s ${q(addon)} --listen-host 127.0.0.1 --listen-port ${listenPort}`;
+}
+
+/** 停止残留 MITM/Ingest，避免端口占用导致「开始抓包」失败 */
+export async function releaseCaptureRuntime(): Promise<void> {
+  if (mitmState) {
+    try {
+      mitmState.process.kill();
+    } catch {
+      /* ignore */
+    }
+    mitmState = null;
+  }
+  if (ingestState) {
+    try {
+      ingestState.process.kill();
+    } catch {
+      /* ignore */
+    }
+    ingestState = null;
+  }
+  disablePacProxy();
+  await stopPacHttpServer();
+  await new Promise((r) => setTimeout(r, 450));
+}
+
 export async function startMitm(options: {
   ingestUrl: string;
   hostFilter?: string;
@@ -495,6 +530,9 @@ export async function startMitm(options: {
   proxyMode?: "pac" | "global" | "embedded";
   pacHosts?: string;
 }): Promise<{ ok: boolean; error?: string; proxy?: string; systemProxyMessage?: string }> {
+  if (mitmState && !isProcessRunning(mitmState.process)) {
+    mitmState = null;
+  }
   if (mitmState && isProcessRunning(mitmState.process)) {
     return { ok: false, error: "MITM 已在运行" };
   }
@@ -507,7 +545,8 @@ export async function startMitm(options: {
   }
   const listenPort = options.listenPort ?? 8888;
   const listenHost = "127.0.0.1";
-  const addon = path.join(getRepoRoot(), "scripts", "mitm_ingest_addon.py");
+  const root = getRepoRoot();
+  const addon = path.join(root, "scripts", "mitm_ingest_addon.py");
   try {
     await fs.access(addon);
   } catch {
@@ -559,13 +598,20 @@ export async function startMitm(options: {
   });
 
   await new Promise((r) => setTimeout(r, 2000));
-  const listening = await isPortListening(listenPort);
+  let listening = await isPortListening(listenPort, listenHost);
+  if (!listening) {
+    await new Promise((r) => setTimeout(r, 1500));
+    listening = await isPortListening(listenPort, listenHost);
+  }
   if (!listening) {
     mitmChild.kill();
     mitmState = null;
+    const detail = trimMitmStderr(mitmErr);
+    const manual = mitmManualCommand(binary, root, listenPort);
+    const head = detail || "mitmdump 启动后立即退出";
     return {
       ok: false,
-      error: (mitmErr.trim() || "mitmdump 启动后立即退出") + "。可在终端执行 .venv\\Scripts\\mitmdump -s scripts\\mitm_ingest_addon.py -p 8888 查看报错",
+      error: `MITM 未运行：${head}。可在终端执行: ${manual}`,
     };
   }
 
@@ -667,6 +713,7 @@ export async function quickCaptureStart(options: {
     if (!started.ok || !started.sessionId) {
       return { ok: false, error: started.error, messages };
     }
+    await releaseCaptureRuntime();
     sessionId = started.sessionId;
     messages.push(`会话 ${sessionId}`);
   }
@@ -699,7 +746,6 @@ export async function quickCaptureStart(options: {
 
   await new Promise((r) => setTimeout(r, 500));
   const baidu = probeHttpsViaMitm("https://www.baidu.com/", 8888);
-  await new Promise((r) => setTimeout(r, 2000));
   const mitmRows = await countMitmIngestedTransactions(options.project, sessionId);
   if (baidu.ok) {
     if (mitmRows > 0) {

@@ -1,8 +1,15 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 
 type CaptureProxyMode = "pac" | "global" | "embedded";
 
+const CAPTURE_PROXY_MODE_OPTIONS: { value: CaptureProxyMode; label: string; hint: string }[] = [
+  { value: "pac", label: "PAC（按域名）", hint: "仅填写的 API 域名走 mitm，其它流量直连" },
+  { value: "embedded", label: "内嵌网页", hint: "广域 PAC，适合壳层 / WebView" },
+  { value: "global", label: "全局代理", hint: "全部流量经代理，部分客户端易白屏" },
+];
+
 import ConfirmDialog from "./ConfirmDialog";
+import AppCustomSelect from "./AppCustomSelect";
 import CaptureSessionsDialog from "./CaptureSessionsDialog";
 import LoadingOverlay from "./LoadingOverlay";
 import BatchSaveCasesDialog from "./BatchSaveCasesDialog";
@@ -57,6 +64,67 @@ function compareCapturedAtDesc(a: TxRow, b: TxRow): number {
   return b.id.localeCompare(a.id);
 }
 
+function isCertInstallBannerMessage(text: string): boolean {
+  return /证书已装入|受信任的根证书|chrome:\/\/restart|mitm\.it/i.test(text);
+}
+
+function formatSessionPickerShort(sessionId: string): string {
+  return formatCaptureSessionHeadline(sessionId).replace(/:\d{2}$/, "");
+}
+
+function formatCaptureSessionHeadline(sessionId: string): string {
+  const head = sessionId.split("-")[0] ?? sessionId;
+  const m = head.match(/^(\d{4})(\d{2})(\d{2})[Tt]?(\d{2})(\d{2})(\d{2})/i);
+  if (!m) return sessionId.slice(0, 12);
+  const [, y, mo, d, h, mi, s] = m;
+  const parsed = new Date(`${y}-${mo}-${d}T${h}:${mi}:${s}Z`);
+  if (!Number.isNaN(parsed.getTime())) {
+    const pad = (n: number) => String(n).padStart(2, "0");
+    return `${pad(parsed.getMonth() + 1)}-${pad(parsed.getDate())} ${pad(parsed.getHours())}:${pad(parsed.getMinutes())}:${pad(parsed.getSeconds())}`;
+  }
+  return `${mo}-${d} ${h}:${mi}:${s}`;
+}
+
+function captureSessionIdHash(sessionId: string): string {
+  const dash = sessionId.indexOf("-");
+  if (dash < 0) return sessionId.slice(0, 8);
+  return sessionId.slice(dash + 1, dash + 9);
+}
+
+function formatCaptureListTime(iso: string | undefined): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (!Number.isNaN(d.getTime())) {
+    const pad = (n: number) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  }
+  const trimmed = iso.replace(/\.(\d{3})\d*Z?$/, ".$1").replace(/Z$/, " UTC");
+  const m = trimmed.match(/(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})/);
+  if (m) return `${m[1]} ${m[2]}`;
+  return iso.replace("T", " ").replace(/Z$/, "");
+}
+
+function httpMethodBadgeClass(method: string): string {
+  const m = method.toUpperCase();
+  if (m === "GET") return "capture-method-badge capture-method-badge--get";
+  if (m === "POST") return "capture-method-badge capture-method-badge--post";
+  if (m === "PUT" || m === "PATCH") return "capture-method-badge capture-method-badge--mutate";
+  if (m === "DELETE") return "capture-method-badge capture-method-badge--delete";
+  if (m === "OPTIONS" || m === "HEAD") return "capture-method-badge capture-method-badge--meta";
+  return "capture-method-badge capture-method-badge--other";
+}
+
+function captureIndexRowsEqual(a: TxRow[], b: TxRow[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i].id !== b[i].id) return false;
+    if (a[i].status !== b[i].status) return false;
+    if (a[i].method !== b[i].method) return false;
+    if (a[i].url !== b[i].url) return false;
+  }
+  return true;
+}
+
 type Props = {
   project: string;
   projectName: string;
@@ -100,8 +168,12 @@ export default function CapturePanel({
   const [mitm, setMitm] = useState<Awaited<ReturnType<typeof window.atp.mitmStatus>>>({ running: false });
   const [mitmAvail, setMitmAvail] = useState(false);
   const [apiOnlyFilter, setApiOnlyFilter] = useState(true);
+  const [followLatest, setFollowLatest] = useState(false);
+  const [pendingNewTxCount, setPendingNewTxCount] = useState(0);
   const [trafficSearch, setTrafficSearch] = useState("");
   const [txPage, setTxPage] = useState(1);
+  const visibleListLenRef = useRef(0);
+  const wasCapturingRef = useRef(false);
   const [sysProxy, setSysProxy] = useState<{ enabled: boolean; server: string; autoConfigUrl?: string }>({
     enabled: false,
     server: "",
@@ -113,6 +185,9 @@ export default function CapturePanel({
   const [batchSaveOpen, setBatchSaveOpen] = useState(false);
   const [batchSaving, setBatchSaving] = useState(false);
   const [detailTab, setDetailTab] = useState<CaptureDetailTab>("response");
+  const [captureHelpOpen, setCaptureHelpOpen] = useState(false);
+  const [captureAdvancedOpen, setCaptureAdvancedOpen] = useState(false);
+  const [certInstallDetail, setCertInstallDetail] = useState<string | null>(null);
 
   useEffect(() => {
     if (!project) {
@@ -131,8 +206,8 @@ export default function CapturePanel({
     }
     try {
       const saved = localStorage.getItem(pacHostsStorageKey(project));
-      if (saved != null) {
-        setPacHosts(saved);
+      if (saved != null && saved.trim()) {
+        setPacHosts(saved.trim());
         return;
       }
     } catch {
@@ -144,13 +219,21 @@ export default function CapturePanel({
   useEffect(() => {
     if (!project) return;
     try {
-      localStorage.setItem(pacHostsStorageKey(project), pacHosts);
+      const trimmed = pacHosts.trim();
+      const key = pacHostsStorageKey(project);
+      if (trimmed) localStorage.setItem(key, trimmed);
+      else localStorage.removeItem(key);
     } catch {
       /* ignore */
     }
   }, [project, pacHosts]);
 
   const capturing = ingest.running || mitm.running;
+  const controlMessage = useMemo(() => {
+    if (!message) return "";
+    if (mitm.running && ingest.running && /MITM\s*未运行/i.test(message)) return "";
+    return message;
+  }, [message, mitm.running, ingest.running]);
   const embeddedMisconfigured = useMemo(
     () => proxyMode === "embedded" && embeddedBypassBlocksApiCapture(pacHosts, protectedApiHosts).length > 0,
     [proxyMode, pacHosts, protectedApiHosts],
@@ -206,8 +289,9 @@ export default function CapturePanel({
             return [];
           })()
         : withoutProbeTransactions;
-    return [...source].sort(compareCapturedAtDesc);
-  }, [transactions, apiOnlyFilter, trafficSearch, withoutProbeTransactions]);
+    const useChronological = capturing && !followLatest && !q;
+    return useChronological ? source : [...source].sort(compareCapturedAtDesc);
+  }, [transactions, apiOnlyFilter, trafficSearch, withoutProbeTransactions, capturing, followLatest]);
 
   const apiMatchCount = useMemo(
     () => filterTransactions(transactions, true).length,
@@ -340,27 +424,27 @@ export default function CapturePanel({
         return {
           title: "等待业务流量",
           hint:
-            "开始抓包时有一条 www.baidu.com 链路自检（验证 MITM→Ingest），不会出现在列表中。请用 Chrome 或已重启的目标客户端访问站点；列表约每 2 秒刷新。",
+            "开始抓包时有一条 www.baidu.com 链路自检（验证 MITM→Ingest），不会出现在列表中。请用 Chrome 或已重启的目标客户端访问站点；默认按写入顺序展示，新请求在末页，可勾选「跟进最新」。",
           action: null,
         };
       }
       return {
         title: "等待流量",
-        hint: "用 Chrome 访问目标站点（HTTPS 需已安装证书并重开浏览器）。列表约每 2 秒刷新。",
+        hint: "用 Chrome 访问目标站点（HTTPS 需已安装证书并重开浏览器）。新流量默认追加到末页，避免列表跳动。",
         action: null,
       };
     }
     if (!activeSessionId) {
       return {
-        title: "暂无抓包记录",
-        hint: "点击「开始抓包」后访问网页，或从历史会话下拉框选择已有会话。",
-        action: null,
+        title: "暂无抓包数据",
+        hint: "开始抓包后，在目标客户端操作，流量将出现在此列表。",
+        action: "startCapture" as const,
       };
     }
     return {
       title: "本会话暂无记录",
-      hint: "该会话未写入流量，或已被「清空列表」。可重新开始抓包。",
-      action: null,
+      hint: "该会话尚未写入流量，或已被清空列表。可重新开始抓包并操作目标应用。",
+      action: "startCapture" as const,
     };
   }, [
     visibleTransactions.length,
@@ -386,7 +470,38 @@ export default function CapturePanel({
 
   useEffect(() => {
     setTxPage(1);
+    setPendingNewTxCount(0);
+    visibleListLenRef.current = 0;
   }, [activeSessionId, apiOnlyFilter]);
+
+  useEffect(() => {
+    if (capturing && !wasCapturingRef.current) {
+      setFollowLatest(false);
+      setPendingNewTxCount(0);
+      visibleListLenRef.current = 0;
+    }
+    wasCapturingRef.current = capturing;
+  }, [capturing]);
+
+  useEffect(() => {
+    if (!capturing || followLatest) {
+      setPendingNewTxCount(0);
+      visibleListLenRef.current = visibleTransactions.length;
+      return;
+    }
+    const prevLen = visibleListLenRef.current;
+    const nextLen = visibleTransactions.length;
+    if (prevLen > 0 && nextLen > prevLen) {
+      setPendingNewTxCount((n) => n + (nextLen - prevLen));
+    }
+    visibleListLenRef.current = nextLen;
+  }, [visibleTransactions.length, capturing, followLatest]);
+
+  useEffect(() => {
+    if (!capturing || !followLatest) return;
+    setPendingNewTxCount(0);
+    setTxPage(1);
+  }, [visibleTransactions.length, capturing, followLatest]);
 
   useEffect(() => {
     if (txPage > txPageCount) setTxPage(txPageCount);
@@ -402,7 +517,8 @@ export default function CapturePanel({
       if (!opts?.silent) setTrafficLoading(true);
       try {
         const { transactions: txs } = await window.atp.getCaptureIndex(project, sid);
-        setTransactions(Array.isArray(txs) ? txs : []);
+        const next = Array.isArray(txs) ? txs : [];
+        setTransactions((prev) => (captureIndexRowsEqual(prev, next) ? prev : next));
       } catch (err) {
         console.error("getCaptureIndex failed", err);
         if (!opts?.silent) setMessage("加载流量列表失败，请停止抓包后重试");
@@ -456,39 +572,74 @@ export default function CapturePanel({
     await refreshIndex();
   };
 
-  const runQuickCaptureStart = async () => {
+  const notifyCaptureIssue = useCallback((text: string, opts?: { expandPac?: boolean }) => {
+    setMessage(text);
+    setDetailToast(text);
+    window.setTimeout(() => setDetailToast(""), 4200);
+    if (opts?.expandPac) setCaptureAdvancedOpen(true);
+  }, []);
+
+  const runQuickCaptureStart = async (pacHostsOverride?: string) => {
     if (!project) return;
     setBusy(true);
     setMessage("");
+    const hostFilter =
+      proxyMode === "pac" || proxyMode === "embedded"
+        ? (pacHostsOverride ?? pacHosts).trim()
+        : "";
     const res = await window.atp.quickCaptureStart({
       project,
       label,
-      hostFilter: proxyMode === "pac" || proxyMode === "embedded" ? pacHosts.trim() : "",
+      hostFilter,
       sessionId: undefined,
       setSystemProxy: true,
       proxyMode,
     });
     setBusy(false);
     if (!res.ok) {
-      setMessage(res.error ?? "启动失败");
+      const base = res.error ?? "启动失败";
+      setMessage(base);
+      showDetailToast(base);
       const d = await window.atp.captureDiagnose(8888);
-      if (d.issues.length) setMessage((m) => `${m} · ${d.issues.join("；")}`);
+      if (d.issues.length) {
+        const full = `${base} · ${d.issues.join("；")}`;
+        setMessage(full);
+        showDetailToast(full);
+      }
       return;
     }
     if (res.sessionId) setSelectedSession(res.sessionId);
-    setMessage(res.messages.join(" · "));
+    setMessage("");
     await refreshStatus();
     await refreshIndex();
   };
 
   const onStart = async () => {
-    if (!project) return;
-    if (proxyMode === "pac" && !pacHosts.trim()) {
-      setMessage("PAC 模式下请填写要快照的 API 域名（逗号分隔）");
+    if (!project) {
+      notifyCaptureIssue("请先在左上角选择项目");
       return;
     }
-    if (!mitmAvail) {
-      setMessage("未安装 mitmproxy，请在仓库根目录 pip install -r requirements-capture.txt");
+    let pacForStart = pacHosts.trim();
+    if (proxyMode === "pac" && !pacForStart) {
+      const csv = captureProfile?.pacHostsCsv?.trim();
+      if (csv) {
+        setPacHosts(csv);
+        pacForStart = csv;
+      }
+    }
+    if (proxyMode === "pac" && !pacForStart) {
+      notifyCaptureIssue(
+        "PAC 模式下请填写 API 域名，或点「高级设置」里的「终端 API PAC」一键填入",
+        { expandPac: true },
+      );
+      return;
+    }
+    const mitmCheck = await window.atp.mitmAvailability();
+    setMitmAvail(mitmCheck.available);
+    if (!mitmCheck.available) {
+      notifyCaptureIssue(
+        "未找到 mitmproxy。在仓库根目录执行：python -m venv .venv && .venv\\Scripts\\pip install -r requirements-capture.txt",
+      );
       return;
     }
     if (embeddedMisconfigured) {
@@ -497,11 +648,11 @@ export default function CapturePanel({
         title: "直连列表会挡住业务 API",
         message: `内嵌网页模式下，「直连域名」不经 mitm。当前含 ${blocked}，这些域名的请求会直连，列表通常为空。建议点取消后改用「PAC（按域名）」并填入项目 API 主机；若仅抓 WebView 外链可仍继续。`,
         confirmLabel: "仍要开始",
-        run: () => void runQuickCaptureStart(),
+        run: () => void runQuickCaptureStart(pacForStart || undefined),
       });
       return;
     }
-    await runQuickCaptureStart();
+    await runQuickCaptureStart(pacForStart || undefined);
   };
 
   const onStop = async () => {
@@ -525,6 +676,12 @@ export default function CapturePanel({
     setBusy(true);
     const res = await window.atp.installMitmCa();
     setBusy(false);
+    if (res.ok) {
+      setCertInstallDetail(res.message);
+      showDetailToast("证书已安装");
+      setMessage((prev) => (prev && isCertInstallBannerMessage(prev) ? "" : prev));
+      return;
+    }
     setMessage(res.message);
   };
 
@@ -652,175 +809,247 @@ export default function CapturePanel({
     setSessionsDeleteOpen(true);
   };
 
+  const proxyEnabledLabel = sysProxy.enabled
+    ? sysProxy.autoConfigUrl
+      ? "PAC 已启用"
+      : sysProxy.server
+        ? "代理已启用"
+        : "代理已启用"
+    : "代理已关闭";
+
   return (
     <>
-      <div className="module-head-row capture-module-head">
-        <h2 className="page-head">抓包</h2>
-        <span className="module-context-chip" title={`项目 ID：${project}`}>
-          {projectName || project}
-        </span>
-      </div>
+      <section className="card capture-control-card">
+        <div className="capture-control-head">
+          <div className="capture-control-head-bar">
+            <div className="capture-control-title-row">
+              <h3 className="card-title capture-control-title">控制</h3>
+              <button
+                type="button"
+                className="capture-help-btn"
+                aria-label="查看抓包说明"
+                aria-expanded={captureHelpOpen}
+                title="桌面客户端与 PAC 配置说明"
+                onClick={() => setCaptureHelpOpen((v) => !v)}
+              >
+                ?
+              </button>
+            </div>
+            <div className="capture-control-head-aside">
+              <div className="capture-status-badges" aria-label="运行状态">
+                <CaptureStatusBadge running={ingest.running} onLabel="Ingest 运行中" offLabel="Ingest 已关闭" />
+                <CaptureStatusBadge running={mitm.running} onLabel="MITM 运行中" offLabel="MITM 已关闭" />
+                <CaptureStatusBadge running={sysProxy.enabled} onLabel={proxyEnabledLabel} offLabel="代理已关闭" />
+              </div>
+              <span className="capture-head-aside-divider" aria-hidden />
+              <button
+                type="button"
+                className={`capture-emergency-restore capture-emergency-restore--secondary${proxyStale ? " capture-emergency-restore--urgent" : ""}`}
+                disabled={busy}
+                title="白屏或 Connecting 时关闭残留系统代理"
+                onClick={() => void onRestoreNetwork()}
+              >
+                <CaptureRestoreNetIcon />
+                仅恢复上网
+              </button>
+            </div>
+          </div>
+          {captureHelpOpen ? (
+            <div className="capture-help-panel" role="region" aria-label="抓包说明">
+              <p>
+                <strong>桌面客户端</strong>：推荐 <strong>PAC（按域名）</strong>，在高级设置中填写 API 主机。可在{" "}
+                <code>project.yaml</code> 配置 <code>capture.pac_hosts</code> 后使用「项目 PAC 模板」。流程：安装证书 → 开始抓包 →
+                <strong>完全退出</strong>目标客户端再打开。慎用「全局代理」（易白屏 / Connecting）。
+              </p>
+              <p className="hint">浏览器抓包需先安装证书；可关闭「仅 API」或按域名搜索过滤列表。</p>
+              <button type="button" className="nav-btn nav-btn--compact" onClick={() => setCaptureHelpOpen(false)}>
+                知道了
+              </button>
+            </div>
+          ) : null}
+        </div>
 
-      <section className="card">
-        <h3 className="card-title">控制</h3>
-        <div className="toolbar capture-control-toolbar">
+        <div className="capture-control-main">
           <input
-            className="text-input"
-            style={{ flex: 1, maxWidth: 220 }}
+            className="text-input capture-control-field capture-control-label"
             placeholder="备注（可选）"
             value={label}
             disabled={capturing}
             onChange={(e) => setLabel(e.target.value)}
           />
-          <select
-            className="text-input capture-proxy-mode"
+          <AppCustomSelect
+            className="capture-proxy-mode-picker"
+            variant="control"
             value={proxyMode}
             disabled={capturing}
-            title="PAC 仅代理填写的 API 域名，其它流量直连"
-            onChange={(e) => setProxyMode(e.target.value as CaptureProxyMode)}
-            aria-label="代理模式"
-          >
-            <option value="pac">PAC（按域名）</option>
-            <option value="embedded">内嵌网页（广域 PAC）</option>
-            <option value="global">全局代理</option>
-          </select>
+            ariaLabel="代理模式"
+            title={CAPTURE_PROXY_MODE_OPTIONS.find((o) => o.value === proxyMode)?.hint}
+            options={CAPTURE_PROXY_MODE_OPTIONS.map((o) => ({
+              value: o.value,
+              label: o.label,
+              title: o.hint,
+            }))}
+            onChange={(v) => setProxyMode(v as CaptureProxyMode)}
+          />
           {!capturing ? (
-            <button type="button" className="nav-btn" disabled={busy} onClick={() => void onInstallCa()}>
-              安装证书
-            </button>
+            <>
+              <button
+                type="button"
+                className="capture-install-cert-btn capture-control-field"
+                disabled={busy}
+                onClick={() => void onInstallCa()}
+              >
+                <CaptureShieldIcon />
+                安装证书
+              </button>
+              {certInstallDetail ? (
+                <span className="capture-cert-badge" title={certInstallDetail}>
+                  <span className="capture-cert-badge-icon" aria-hidden>
+                    ✓
+                  </span>
+                  证书已安装
+                </span>
+              ) : null}
+            </>
+          ) : null}
+          {!capturing && activeSessionId ? (
+            <CaptureSessionSummaryRow
+              sessionId={activeSessionId}
+              capturing={false}
+              compact
+              onCopied={showDetailToast}
+            />
           ) : null}
           {!capturing ? (
-            <button type="button" className="primary" disabled={busy || !project} onClick={() => void onStart()}>
+            <button
+              type="button"
+              className="primary capture-start-btn capture-control-field"
+              disabled={busy || !project}
+              onClick={() => void onStart()}
+            >
+              <CapturePlayIcon />
               开始抓包
             </button>
           ) : (
-            <button type="button" className="primary" disabled={busy} onClick={() => void onStop()}>
+            <button
+              type="button"
+              className="capture-stop-btn capture-control-field"
+              disabled={busy}
+              onClick={() => void onStop()}
+            >
+              <CaptureStopIcon />
               停止并恢复上网
             </button>
           )}
-          {proxyStale && (
-            <button type="button" className="nav-btn" disabled={busy} onClick={() => void onRestoreNetwork()}>
-              恢复上网
-            </button>
-          )}
         </div>
 
-        <div className="status-strip">
-          <span className={capturing ? "dot-live" : ""} />
-          Ingest {ingest.running ? "开" : "关"}
-          {" · "}
-          MITM {mitm.running ? "开" : "关"}
-          {" · "}
-          代理{" "}
-          {sysProxy.enabled
-            ? sysProxy.autoConfigUrl
-              ? "PAC"
-              : sysProxy.server || "开"
-            : "关"}
-          {activeSessionId && (
-            <>
-              {" · "}
-              会话 <code>{activeSessionId.slice(0, 20)}…</code>
-            </>
-          )}
+        <div className="capture-control-meta">
+          {capturing ? (
+            <p className="capture-session-brief">抓包进行中，请在目标客户端内操作；停止后将恢复系统上网设置。</p>
+          ) : null}
+          {capturing && activeSessionId ? (
+            <CaptureSessionSummaryRow
+              sessionId={activeSessionId}
+              capturing
+              onCopied={showDetailToast}
+            />
+          ) : null}
+          {(proxyMode === "pac" || proxyMode === "embedded") && !capturing ? (
+            <div className="capture-advanced">
+              <button
+                type="button"
+                className="capture-advanced-toggle capture-advanced-toggle--ghost"
+                aria-expanded={captureAdvancedOpen}
+                onClick={() => setCaptureAdvancedOpen((v) => !v)}
+              >
+                <span className="capture-advanced-chevron" aria-hidden>
+                  {captureAdvancedOpen ? "▼" : "▶"}
+                </span>
+                {captureAdvancedOpen ? "收起高级设置（PAC / 直连域名）" : "高级设置（PAC / 直连域名）"}
+              </button>
+              {captureAdvancedOpen ? (
+                <div className="capture-pac-hosts">
+                  <span className="capture-pac-hosts-label">
+                    {proxyMode === "embedded"
+                      ? "可选直连域名（内嵌网页模式下不走 mitm，用于壳层/静态资源）"
+                      : "PAC 域名（仅这些主机走 mitm，逗号分隔）"}
+                  </span>
+                  <div className="capture-pac-hosts-row">
+                    <input
+                      className="text-input capture-pac-hosts-input"
+                      placeholder={
+                        proxyMode === "embedded"
+                          ? "留空=除内网外公网 HTTPS 均走 mitm；例：cdn.example.com"
+                          : PAC_HOSTS_PLACEHOLDER
+                      }
+                      value={pacHosts}
+                      disabled={capturing}
+                      onChange={(e) => setPacHosts(e.target.value)}
+                    />
+                    {proxyMode === "embedded" ? (
+                      <button
+                        type="button"
+                        className="nav-btn nav-btn--compact"
+                        disabled={capturing}
+                        onClick={() => setPacHosts("")}
+                      >
+                        清空直连
+                      </button>
+                    ) : (
+                      <>
+                        <button
+                          type="button"
+                          className="nav-btn nav-btn--compact"
+                          disabled={capturing || !captureProfile?.pacHostsCsv}
+                          title="填入本项目 capture.pac_hosts（或从环境 base_url 推导）并切换到 PAC"
+                          onClick={applyProjectPacTemplate}
+                        >
+                          {captureProfile?.templateLabel ?? "项目 PAC 模板"}
+                        </button>
+                        {captureProfile?.presets?.length ? (
+                          <AppCustomSelect
+                            className="capture-pac-preset-select"
+                            variant="control"
+                            value=""
+                            showCheck={false}
+                            disabled={capturing}
+                            placeholder="全局预设…"
+                            ariaLabel="全局 PAC 预设"
+                            title="platform.config.yaml 中的全局 PAC 预设"
+                            options={captureProfile.presets.map((p) => ({
+                              value: p.hosts,
+                              label: p.label,
+                            }))}
+                            onChange={(hosts) => {
+                              if (hosts) applyPacPreset(hosts);
+                            }}
+                          />
+                        ) : null}
+                      </>
+                    )}
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
         </div>
 
         {(proxyStale || (capturing && proxyMode === "global")) && (
-          <p className="hint warn">
+          <p className="capture-inline-alert">
             {proxyStale
-              ? "系统代理仍开着但抓包未运行。部分桌面客户端可能一直显示 Connecting——请先点「仅恢复上网」，再完全退出客户端后重开。"
-              : "全局代理下部分桌面客户端首页易白屏/Connecting。建议停止后改用 PAC 或内嵌网页模式。"}
+              ? "系统代理仍开启但抓包未运行，客户端可能一直 Connecting。请点右上角「仅恢复上网」后完全退出客户端再开。"
+              : "全局代理下部分客户端易白屏，建议停止后改用 PAC 或内嵌网页模式。"}
           </p>
         )}
-        <div className="capture-recovery-row">
-          <button
-            type="button"
-            className={`nav-btn${proxyStale ? " capture-recovery-btn--urgent" : ""}`}
-            disabled={busy}
-            onClick={() => void onRestoreNetwork()}
-          >
-            仅恢复上网（白屏 / Connecting 时点此项）
-          </button>
-        </div>
 
-        {message && <p className="hint">{message}</p>}
-
-        {!capturing && (
-          <p className="hint">
-            <strong>桌面客户端</strong>：请用 <strong>PAC（按域名）</strong>，把 API 主机填在下栏（不要放在内嵌模式的「直连」）。可在{" "}
-            <code>project.yaml</code> 配置 <code>capture.pac_hosts</code> 后点「项目 PAC 模板」。安装证书 → 开始抓包 →
-            <strong>完全退出</strong>客户端再打开。慎用「全局代理」（易白屏）。
-          </p>
-        )}
+        {controlMessage && !isCertInstallBannerMessage(controlMessage) ? (
+          <CaptureControlMessage text={controlMessage} />
+        ) : null}
         {embeddedMisconfigured && !capturing && (
           <p className="hint warn">
             当前为内嵌网页，且直连列表含 <code>{embeddedBlockedHosts.join(", ")}</code>，这些域名的 HTTPS <strong>不会进 mitm</strong>
             ，业务 API 无法出现在列表。请点「改用 PAC 抓包」或清空直连后只用 PAC 模式填写 API 域名。
           </p>
-        )}
-        {(proxyMode === "pac" || proxyMode === "embedded") && !capturing && (
-          <div className="capture-pac-hosts">
-            <span className="capture-pac-hosts-label">
-              {proxyMode === "embedded"
-                ? "可选直连域名（内嵌网页模式下不走 mitm，用于壳层/静态资源）"
-                : "PAC 域名（仅这些主机走 mitm，逗号分隔）"}
-            </span>
-            <div className="capture-pac-hosts-row">
-              <input
-                className="text-input capture-pac-hosts-input"
-                placeholder={
-                  proxyMode === "embedded"
-                    ? "留空=除内网外公网 HTTPS 均走 mitm；例：cdn.example.com"
-                    : PAC_HOSTS_PLACEHOLDER
-                }
-                value={pacHosts}
-                disabled={capturing}
-                onChange={(e) => setPacHosts(e.target.value)}
-              />
-              {proxyMode === "embedded" ? (
-                <button
-                  type="button"
-                  className="nav-btn nav-btn--compact"
-                  disabled={capturing}
-                  onClick={() => setPacHosts("")}
-                >
-                  清空直连
-                </button>
-              ) : (
-                <>
-                  <button
-                    type="button"
-                    className="nav-btn nav-btn--compact"
-                    disabled={capturing || !captureProfile?.pacHostsCsv}
-                    title="填入本项目 capture.pac_hosts（或从环境 base_url 推导）并切换到 PAC"
-                    onClick={applyProjectPacTemplate}
-                  >
-                    {captureProfile?.templateLabel ?? "项目 PAC 模板"}
-                  </button>
-                  {captureProfile?.presets?.length ? (
-                    <select
-                      className="text-input capture-pac-preset-select"
-                      disabled={capturing}
-                      defaultValue=""
-                      title="platform.config.yaml 中的全局 PAC 预设"
-                      onChange={(e) => {
-                        const v = e.target.value;
-                        if (v) applyPacPreset(v);
-                        e.target.value = "";
-                      }}
-                    >
-                      <option value="">全局预设…</option>
-                      {captureProfile.presets.map((p) => (
-                        <option key={p.id} value={p.hosts}>
-                          {p.label}
-                        </option>
-                      ))}
-                    </select>
-                  ) : null}
-                </>
-              )}
-            </div>
-          </div>
         )}
         {embeddedMisconfigured && !capturing && (
           <div className="capture-pac-fix-row">
@@ -828,18 +1057,6 @@ export default function CapturePanel({
               改用 PAC 抓包
             </button>
           </div>
-        )}
-        {proxyMode === "embedded" && !capturing && (
-          <p className="hint capture-proxy-hint">
-            <strong>内嵌网页：</strong>先点「开始抓包」→ 再启动目标应用 → 打开内嵌 H5/WebView 页面。广域 PAC 会将公网
-            HTTP(S) 经 mitm（内网与本机直连）。
-          </p>
-        )}
-        {capturing && (proxyMode === "pac" || proxyMode === "embedded") && (
-          <p className="hint capture-proxy-hint">
-            ① 已安装 MITM 证书 ② 抓包开始后<strong>完全退出</strong>目标应用再打开 ③ 在应用内触发请求。若仍无记录：试「内嵌网页」模式、关「仅
-            API」或按域名搜索。SSL Pinning 无法 mitm。
-          </p>
         )}
         {capturing && embeddedMisconfigured && (
           <p className="hint warn">
@@ -851,39 +1068,19 @@ export default function CapturePanel({
             尚无业务流量（仅自检或无请求经过 mitm）。请确认 PAC 含实际 API 主机、证书已装，并已重启目标应用后再次操作；可先关闭「仅 API」或用域名搜索。
           </p>
         )}
-        {capturing && (
-          <p className="hint">
-            {proxyMode === "global" ? (
-              <>
-                当前为<strong>全局代理</strong>：若客户端白屏，请点「停止」后改用 <strong>内嵌网页</strong> 或 <strong>PAC</strong>。
-              </>
-            ) : proxyMode === "embedded" ? (
-              <>
-                当前为<strong>内嵌网页广域 PAC</strong>
-                {pacHosts.trim() ? (
-                  <>
-                    ，直连：<code className="capture-pac-inline">{pacHosts}</code>
-                  </>
-                ) : (
-                  <>（公网 HTTP(S) 均经 mitm）</>
-                )}
-              </>
-            ) : (
-              <>
-                当前 PAC 路由：
-                <code className="capture-pac-inline">{pacHosts.trim() || "（未配置）"}</code>
-              </>
-            )}
-            {" "}
-            浏览器抓包需先安装证书；可关「仅 API」或搜索域名过滤。
+        {capturing && proxyMode !== "global" && (proxyMode === "pac" || proxyMode === "embedded") ? (
+          <p className="hint capture-route-hint">
+            路由：
+            <code className="capture-pac-inline">{pacHosts.trim() || (proxyMode === "embedded" ? "广域 PAC" : "（未配置）")}</code>
           </p>
-        )}
+        ) : null}
       </section>
 
-      <section className="card traffic-anchor">
-        <div className="toolbar" style={{ marginBottom: 12 }}>
-          <h3 className="card-title" style={{ margin: 0, flex: 1 }}>
-            流量列表
+      <section className="card traffic-anchor capture-traffic-card">
+        <div className="capture-traffic-toolbar">
+          <div className="capture-traffic-toolbar-leading">
+          <h3 className="card-title capture-traffic-title">
+            抓包列表
             {activeSessionId && (
               <span className="hint" style={{ fontWeight: 400, marginLeft: 8 }}>
                 {trafficSearch.trim()
@@ -904,52 +1101,80 @@ export default function CapturePanel({
             />
             仅 API
           </label>
-          <input
-            className="text-input capture-traffic-search"
-            placeholder="搜索 URL / 域名"
-            value={trafficSearch}
-            onChange={(e) => {
-              setTrafficSearch(e.target.value);
-              setTxPage(1);
-            }}
-          />
-          {sessions.length > 0 && !capturing && (
-            <select
-              className="session-select"
+          {capturing ? (
+            <label className="check-label capture-api-only" title="开启后按时间倒序并固定在第 1 页展示最新请求">
+              <input
+                type="checkbox"
+                checked={followLatest}
+                onChange={(e) => {
+                  const on = e.target.checked;
+                  setFollowLatest(on);
+                  setPendingNewTxCount(0);
+                  visibleListLenRef.current = visibleTransactions.length;
+                  if (on) setTxPage(1);
+                }}
+              />
+              跟进最新
+            </label>
+          ) : null}
+          {capturing && !followLatest && pendingNewTxCount > 0 ? (
+            <button
+              type="button"
+              className="capture-new-tx-chip"
+              onClick={() => {
+                setTxPage(txPageCount);
+                setPendingNewTxCount(0);
+              }}
+            >
+              +{pendingNewTxCount} 条新请求 · 跳至末页
+            </button>
+          ) : null}
+          </div>
+          <div className="capture-traffic-search-wrap">
+            <CaptureSearchIcon />
+            <input
+              className="text-input capture-traffic-search"
+              placeholder="搜索 URL 或 Path"
+              value={trafficSearch}
+              onChange={(e) => {
+                setTrafficSearch(e.target.value);
+                setTxPage(1);
+              }}
+            />
+          </div>
+          <div className="capture-traffic-toolbar-actions">
+          {sessions.length > 0 && !capturing ? (
+            <CaptureSessionSelect
+              sessions={sessions}
               value={selectedSession || activeSessionId}
               disabled={ingest.running}
-              onChange={(e) => {
-                setSelectedSession(e.target.value);
+              liveSessionId={lockedCaptureSessionId}
+              onChange={(id) => {
+                setSelectedSession(id);
                 setSelectedTx(null);
                 setDraftYaml("");
               }}
-              title={ingest.running ? "抓包中固定为当前会话" : "切换历史会话"}
-            >
-              {sessions.map((s) => (
-                <option key={s.id} value={s.id}>
-                  {ingest.running && ingest.sessionId === s.id ? "当前 · " : "历史 · "}
-                  {s.transactionCount} 条 · {s.id.slice(0, 18)}…
-                </option>
-              ))}
-            </select>
-          )}
+            />
+          ) : null}
           <button
             type="button"
-            className="nav-btn"
+            className="capture-icon-btn capture-icon-btn--clear-session"
             disabled={busy || !activeSessionId}
-            title="仅清空列表，保留会话"
+            title="清空当前会话内全部流量记录（保留会话目录，不可恢复）"
+            aria-label="清空当前会话记录"
             onClick={() => void onClearTransactions()}
           >
-            清空列表
+            <CaptureSweepIcon />
           </button>
           <button
             type="button"
-            className="nav-btn"
+            className="capture-icon-btn capture-icon-btn--delete-sessions"
             disabled={busy || !sessions.length}
-            title="勾选并删除多个历史会话"
+            title="打开对话框，勾选并删除历史抓包会话（不可恢复）"
+            aria-label="删除历史会话"
             onClick={() => onDeleteSessions()}
           >
-            删除会话…
+            <CaptureTrashIcon />
           </button>
           {selectedCount > 0 ? (
             <>
@@ -969,13 +1194,12 @@ export default function CapturePanel({
                 保存到项目用例
               </button>
             </>
-          ) : (
-            <span className="hint capture-select-hint">勾选多条流量可批量保存为用例</span>
-          )}
+          ) : null}
+          </div>
         </div>
         <div className="loading-host capture-traffic-table-host">
           <LoadingOverlay show={trafficLoading} label="加载流量…" />
-          <table>
+          <table className="capture-traffic-table">
             <thead>
               <tr>
                 <th className="capture-tx-check-col">
@@ -1011,8 +1235,10 @@ export default function CapturePanel({
                     onChange={() => toggleTxChecked(t.id)}
                   />
                 </td>
-                <td>{t.captured_at}</td>
-                <td>{t.method}</td>
+                <td className="capture-time-cell">{formatCaptureListTime(t.captured_at)}</td>
+                <td>
+                  <span className={httpMethodBadgeClass(t.method)}>{t.method}</span>
+                </td>
                 <td>
                   {t.status ? (
                     <span className={`capture-status-pill capture-status-pill--${responseStatusTone(t.status)}`}>
@@ -1022,15 +1248,19 @@ export default function CapturePanel({
                     <span className="hint">—</span>
                   )}
                 </td>
-                <td>{t.path}</td>
-                <td className="url-cell">{t.url}</td>
+                <td className="capture-path-cell">{t.path}</td>
+                <td className="url-cell">
+                  <CaptureUrlCell url={t.url} onCopied={showDetailToast} />
+                </td>
               </tr>
             );
             })}
             {!visibleTransactions.length && emptyListState && (
               <tr className="capture-empty-row">
                 <td colSpan={6}>
-                  <div className="capture-empty-state">
+                  <div
+                    className={`capture-empty-state${emptyListState.action === "startCapture" ? " capture-empty-state--cta" : ""}`}
+                  >
                     <div className="capture-empty-icon" aria-hidden>
                       ∅
                     </div>
@@ -1054,6 +1284,17 @@ export default function CapturePanel({
                         显示全部流量
                       </button>
                     )}
+                    {emptyListState.action === "startCapture" && !capturing ? (
+                      <button
+                        type="button"
+                        className="primary capture-start-btn capture-empty-start-btn"
+                        disabled={busy || !project}
+                        onClick={() => void onStart()}
+                      >
+                        <CapturePlayIcon />
+                        开始抓包
+                      </button>
+                    ) : null}
                   </div>
                 </td>
               </tr>
@@ -1061,29 +1302,40 @@ export default function CapturePanel({
             </tbody>
           </table>
         </div>
-        {visibleTransactions.length > TX_PAGE_SIZE && (
-          <div className="pagination">
-            <button
-              type="button"
-              className="nav-btn"
-              disabled={txPage <= 1}
-              onClick={() => setTxPage((p) => Math.max(1, p - 1))}
-            >
-              上一页
-            </button>
-            <span className="pagination-info">
-              第 {txPage} / {txPageCount} 页 · 每页 {TX_PAGE_SIZE} 条 · 共 {visibleTransactions.length} 条
-            </span>
-            <button
-              type="button"
-              className="nav-btn"
-              disabled={txPage >= txPageCount}
-              onClick={() => setTxPage((p) => Math.min(txPageCount, p + 1))}
-            >
-              下一页
-            </button>
+        {selectedCount === 0 ? (
+          <p className="capture-table-foot-hint">勾选多条流量可批量保存为用例</p>
+        ) : null}
+        {visibleTransactions.length > 0 ? (
+          <div className="capture-pagination-footer">
+            <div className="capture-pagination">
+              <span className="capture-pagination-meta">共 {visibleTransactions.length} 条</span>
+              {visibleTransactions.length > TX_PAGE_SIZE ? (
+                <div className="capture-pagination-controls">
+                  <button
+                    type="button"
+                    className="nav-btn nav-btn--compact"
+                    disabled={txPage <= 1}
+                    onClick={() => setTxPage((p) => Math.max(1, p - 1))}
+                  >
+                    上一页
+                  </button>
+                  <span className="capture-pagination-page">
+                    第 {txPage} / {txPageCount} 页
+                  </span>
+                  <button
+                    type="button"
+                    className="nav-btn nav-btn--compact"
+                    disabled={txPage >= txPageCount}
+                    onClick={() => setTxPage((p) => Math.min(txPageCount, p + 1))}
+                  >
+                    下一页
+                  </button>
+                </div>
+              ) : null}
+              <span className="capture-pagination-size">每页 {TX_PAGE_SIZE} 条</span>
+            </div>
           </div>
-        )}
+        ) : null}
       </section>
 
       {selectedTx && (
@@ -1215,6 +1467,352 @@ export default function CapturePanel({
         onConfirm={(opts) => void runBatchSave(opts)}
       />
     </>
+  );
+}
+
+const TECHNICAL_MSG =
+  /mitm|mitmdump|venv|Scripts|未运行|退出|pip install|8888|\.py/i;
+
+function looksLikePathSegment(segment: string): boolean {
+  return /[\\/]|mitmdump|\.py|venv|Scripts/i.test(segment);
+}
+
+function isTechnicalCaptureSegment(seg: string): boolean {
+  if (/^会话\s/u.test(seg)) return true;
+  if (/^Ingest\s/i.test(seg)) return true;
+  if (/^MITM\s/i.test(seg) && /[\d.:]/i.test(seg)) return true;
+  if (/127\.0\.0\.1|localhost|WinHTTP|ProxyEnable|Registry|proxy server/i.test(seg)) return true;
+  return looksLikePathSegment(seg);
+}
+
+function humanCaptureSummary(segments: string[], mitmDown: boolean): string {
+  if (mitmDown) return "MITM 代理未运行，无法拦截 HTTPS。";
+  const human = segments.filter((s) => !isTechnicalCaptureSegment(s));
+  const informative = human.find((s) => /真实链路|自检|警告|系统代理|已写入|请/.test(s));
+  if (informative) return informative;
+  if (human.length) return human[human.length - 1];
+  return "抓包服务已启动，可在目标客户端访问业务站点。";
+}
+
+function CaptureControlMessage({ text }: { text: string }) {
+  const warn = TECHNICAL_MSG.test(text) || /警告|失败|未开启/i.test(text);
+  const mitmDown = /MITM\s*未运行/i.test(text);
+  const displayText = mitmDown ? text.replace(/^MITM\s*未运行[:：]\s*/i, "") : text;
+  const segments = displayText
+    .split(/[·;；]/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const bodySegments = mitmDown ? segments.filter((s) => !/^MITM\s*未运行\.?$/i.test(s)) : segments;
+  const technical = bodySegments.filter(isTechnicalCaptureSegment);
+  const summary = humanCaptureSummary(bodySegments, mitmDown);
+
+  return (
+    <div
+      className={`capture-control-alert capture-control-alert--compact${warn ? " capture-control-alert--warn" : " capture-control-alert--info"}`}
+      role="status"
+    >
+      {mitmDown ? <p className="capture-control-alert-lead">MITM 未运行</p> : null}
+      <p className="capture-control-alert-summary">{summary}</p>
+      {technical.length > 0 || bodySegments.length > 1 ? (
+        <details className="capture-control-tech-details">
+          <summary>查看技术详情</summary>
+          <div className="capture-control-alert-body">
+            {bodySegments.map((seg, i) => (
+              <p key={`${i}-${seg.slice(0, 24)}`} className="capture-control-tech-line">
+                {looksLikePathSegment(seg) ? <code>{seg}</code> : seg}
+              </p>
+            ))}
+          </div>
+        </details>
+      ) : null}
+    </div>
+  );
+}
+
+function CaptureSessionSelect({
+  sessions,
+  value,
+  disabled,
+  liveSessionId,
+  onChange,
+}: {
+  sessions: Session[];
+  value: string;
+  disabled?: boolean;
+  liveSessionId: string | null;
+  onChange: (id: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+
+  const selected = sessions.find((s) => s.id === value);
+
+  const pickerSessions = useMemo(() => {
+    const copy = [...sessions];
+    copy.sort((a, b) => {
+      const ta = a.started_at || a.id;
+      const tb = b.started_at || b.id;
+      return ta < tb ? 1 : ta > tb ? -1 : 0;
+    });
+    return copy.filter((s) => s.transactionCount > 0 || s.id === value);
+  }, [sessions, value]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent) => {
+      if (rootRef.current && !rootRef.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, [open]);
+
+  const isLive = Boolean(liveSessionId && value && liveSessionId === value);
+  const triggerLabel = selected
+    ? isLive
+      ? `当前 · ${formatSessionPickerShort(selected.id)} · ${selected.transactionCount} 条`
+      : `${formatSessionPickerShort(selected.id)} · ${selected.transactionCount} 条`
+    : "选择会话";
+
+  return (
+    <div className="capture-session-picker" ref={rootRef}>
+      <button
+        type="button"
+        className="capture-session-picker-trigger"
+        disabled={disabled}
+        aria-expanded={open}
+        aria-haspopup="listbox"
+        aria-label="切换历史抓包会话"
+        title="切换历史抓包会话"
+        onClick={() => setOpen((v) => !v)}
+      >
+        {isLive ? (
+          <span className="capture-session-picker-live-dot" aria-hidden />
+        ) : (
+          <CaptureFolderIcon />
+        )}
+        <span className="capture-session-picker-trigger-text">{triggerLabel}</span>
+        <span className="capture-session-picker-chevron" aria-hidden>
+          ▾
+        </span>
+      </button>
+      {open ? (
+        <div className="capture-session-picker-panel" role="listbox" aria-label="历史会话">
+          {pickerSessions.map((s) => {
+            const active = s.id === value;
+            const empty = s.transactionCount === 0;
+            return (
+              <button
+                key={s.id}
+                type="button"
+                role="option"
+                aria-selected={active}
+                className={`capture-session-picker-option${active ? " capture-session-picker-option--active" : ""}${empty ? " capture-session-picker-option--empty" : ""}`}
+                onClick={() => {
+                  onChange(s.id);
+                  setOpen(false);
+                }}
+              >
+                <span className="capture-session-picker-time">{formatCaptureSessionHeadline(s.id)}</span>
+                <span className="capture-session-picker-sep" aria-hidden>
+                  |
+                </span>
+                <span className={`capture-session-picker-count${empty ? " is-empty" : ""}`}>
+                  {s.transactionCount} 条
+                </span>
+                {active ? (
+                  <span className="capture-session-picker-check" aria-hidden>
+                    ✓
+                  </span>
+                ) : null}
+              </button>
+            );
+          })}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function CaptureSessionSummaryRow({
+  sessionId,
+  capturing,
+  compact,
+  onCopied,
+}: {
+  sessionId: string;
+  capturing: boolean;
+  compact?: boolean;
+  onCopied: (msg: string) => void;
+}) {
+  const onCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(sessionId);
+      onCopied("已复制会话 ID");
+    } catch {
+      onCopied("复制失败");
+    }
+  };
+  return (
+    <div className={`capture-session-summary${compact ? " capture-session-summary--compact" : ""}`}>
+      {compact ? null : (
+        <span className="capture-session-summary-label">{capturing ? "进行中会话" : "当前会话"}</span>
+      )}
+      <span className="capture-session-summary-time">{formatCaptureSessionHeadline(sessionId)}</span>
+      <span className="capture-session-id-chip" title={sessionId}>
+        <code>{captureSessionIdHash(sessionId)}</code>
+        <button
+          type="button"
+          className="capture-session-id-chip-copy"
+          title="复制会话 ID"
+          aria-label="复制会话 ID"
+          onClick={() => void onCopy()}
+        >
+          <CaptureCopyIcon />
+        </button>
+      </span>
+    </div>
+  );
+}
+
+function CaptureUrlCell({
+  url,
+  onCopied,
+}: {
+  url: string;
+  onCopied: (msg: string) => void;
+}) {
+  const onCopy = async (e: MouseEvent) => {
+    e.stopPropagation();
+    try {
+      await navigator.clipboard.writeText(url);
+      onCopied("已复制 URL");
+    } catch {
+      onCopied("复制失败");
+    }
+  };
+  return (
+    <span className="capture-url-cell-inner" title={url}>
+      <span className="capture-url-text">{url}</span>
+      <button type="button" className="capture-url-copy" title="复制 URL" aria-label="复制 URL" onClick={onCopy}>
+        <CaptureCopyIcon />
+      </button>
+    </span>
+  );
+}
+
+function CaptureStatusBadge({
+  running,
+  onLabel,
+  offLabel,
+}: {
+  running: boolean;
+  onLabel: string;
+  offLabel: string;
+}) {
+  return (
+    <span
+      className={`capture-status-badge${running ? " capture-status-badge--on" : " capture-status-badge--off"}`}
+    >
+      <span className="capture-status-badge-dot" aria-hidden />
+      {running ? onLabel : offLabel}
+    </span>
+  );
+}
+
+function CaptureRestoreNetIcon() {
+  return (
+    <svg className="capture-restore-net-icon" viewBox="0 0 16 16" aria-hidden focusable="false">
+      <path
+        fill="currentColor"
+        d="M8 1.75a6.25 6.25 0 1 1 0 12.5A6.18 6.18 0 0 1 2.9 9h1.5a4.75 4.75 0 1 0 1.02-3.07H6V3.5h4v4H6V5.63a4.88 4.88 0 0 0-.15-.05 4.75 4.75 0 1 0 3.15 8.42h.01V12H7v4h4v-4H9.57A6.24 6.24 0 0 1 8 14.75Z"
+      />
+    </svg>
+  );
+}
+
+function CaptureStopIcon() {
+  return (
+    <svg className="capture-btn-icon" viewBox="0 0 16 16" aria-hidden focusable="false">
+      <rect x="4.25" y="4.25" width="7.5" height="7.5" rx="1" fill="currentColor" />
+    </svg>
+  );
+}
+
+function CaptureSearchIcon() {
+  return (
+    <svg className="capture-search-icon" viewBox="0 0 16 16" aria-hidden focusable="false">
+      <path
+        fill="currentColor"
+        d="M7 2.5a4.5 4.5 0 1 1 0 9 4.5 4.5 0 0 1 0-9Zm0 1.25a3.25 3.25 0 1 0 0 6.5 3.25 3.25 0 0 0 0-6.5Zm4.36 7.39 2.45 2.45a.63.63 0 1 1-.89.89l-2.45-2.45a.63.63 0 0 1 .89-.89Z"
+      />
+    </svg>
+  );
+}
+
+function CaptureCopyIcon() {
+  return (
+    <svg className="capture-url-copy-icon" viewBox="0 0 16 16" aria-hidden focusable="false">
+      <path
+        fill="currentColor"
+        d="M5.5 2.75A.75.75 0 0 1 6.25 2h5.5a.75.75 0 0 1 .75.75v9.5A.75.75 0 0 1 11.75 13h-5.5A.75.75 0 0 1 5.5 12.25v-9.5Zm1.5 1.25v7.75h4v-7.75h-4ZM3.75 5.25A.75.75 0 0 0 3 6v6.75A1.75 1.75 0 0 0 4.75 14.5h5.5v-1.25h-5a.5.5 0 0 1-.5-.5V5.25Z"
+      />
+    </svg>
+  );
+}
+
+function CapturePlayIcon() {
+  return (
+    <svg className="capture-btn-icon capture-btn-icon--play" viewBox="0 0 16 16" aria-hidden focusable="false">
+      <path fill="currentColor" d="M5.5 3.2a.75.75 0 0 1 1.14-.64l5.5 4.3a.75.75 0 0 1 0 1.28l-5.5 4.3A.75.75 0 0 1 5.5 11V3.2Z" />
+    </svg>
+  );
+}
+
+function CaptureShieldIcon() {
+  return (
+    <svg className="capture-btn-icon" viewBox="0 0 16 16" aria-hidden focusable="false">
+      <path
+        fill="currentColor"
+        d="M8 1.5 3.25 3.5v4.1c0 3.05 2.02 5.9 4.75 6.85 2.73-.95 4.75-3.8 4.75-6.85v-4.1L8 1.5Zm0 1.24 3.75 1.65v3.21c0 2.46-1.62 4.75-3.75 5.5-2.13-.75-3.75-3.04-3.75-5.5V4.39L8 2.74Z"
+      />
+    </svg>
+  );
+}
+
+function CaptureSweepIcon() {
+  return (
+    <svg className="capture-toolbar-icon" viewBox="0 0 16 16" aria-hidden focusable="false">
+      <path
+        fill="currentColor"
+        d="M2 4.25h8.5v1H2v-1ZM2 7.25h6v1H2v-1ZM2 10.25h4v1H2v-1Z"
+      />
+      <path
+        fill="currentColor"
+        d="m11.2 9.1 3.2 3.2-1.4 1.4-3.2-3.2 1.4-1.4Zm.9-1.3 1.7-1.7a.75.75 0 0 1 1.06 0l2 2a.75.75 0 0 1 0 1.06l-1.7 1.7-3.06-3.06Z"
+      />
+    </svg>
+  );
+}
+
+function CaptureFolderIcon() {
+  return (
+    <svg className="capture-session-folder-icon" viewBox="0 0 16 16" aria-hidden focusable="false">
+      <path
+        fill="currentColor"
+        d="M2.5 4.25A1.25 1.25 0 0 1 3.75 3h2.9l1.1 1.25h4.5A1.25 1.25 0 0 1 13.25 5.5v7A1.25 1.25 0 0 1 12 13.75H4A1.25 1.25 0 0 1 2.75 12.5v-8.25Z"
+      />
+    </svg>
+  );
+}
+
+function CaptureTrashIcon() {
+  return (
+    <svg className="capture-toolbar-icon" viewBox="0 0 16 16" aria-hidden focusable="false">
+      <path
+        fill="currentColor"
+        d="M5.5 1.75a.75.75 0 0 1 .75-.75H9.75a.75.75 0 0 1 .75.75V3h3.25a.75.75 0 0 1 0 1.5h-.38l-.83 9.2A1.5 1.5 0 0 1 11.08 15H4.92a1.5 1.5 0 0 1-1.49-1.3l-.83-9.2H2.5a.75.75 0 0 1 0-1.5H5.5V1.75Zm2 .75v.5h1.5V2.5H7.5ZM4.5 4.5l.78 8.6a.25.25 0 0 0 .24.22h5.16a.25.25 0 0 0 .24-.22l.78-8.6H4.5Z"
+      />
+    </svg>
   );
 }
 

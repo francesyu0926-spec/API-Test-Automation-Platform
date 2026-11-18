@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 type SessionRow = {
   id: string;
@@ -17,6 +17,47 @@ type Props = {
   onConfirm: (sessionIds: string[]) => void;
 };
 
+function formatSessionIdHeadline(sessionId: string): string {
+  const head = sessionId.split("-")[0] ?? sessionId;
+  const m = head.match(/^(\d{4})(\d{2})(\d{2})[Tt]?(\d{2})(\d{2})(\d{2})/i);
+  if (!m) return sessionId.slice(0, 12);
+  const [, y, mo, d, h, mi, s] = m;
+  const parsed = new Date(`${y}-${mo}-${d}T${h}:${mi}:${s}Z`);
+  if (!Number.isNaN(parsed.getTime())) {
+    const pad = (n: number) => String(n).padStart(2, "0");
+    return `${pad(parsed.getMonth() + 1)}-${pad(parsed.getDate())} ${pad(parsed.getHours())}:${pad(parsed.getMinutes())}:${pad(parsed.getSeconds())}`;
+  }
+  return `${mo}-${d} ${h}:${mi}:${s}`;
+}
+
+function formatSessionListTime(s: SessionRow): string {
+  if (s.started_at) {
+    const d = new Date(s.started_at);
+    if (!Number.isNaN(d.getTime())) {
+      const pad = (n: number) => String(n).padStart(2, "0");
+      return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+    }
+  }
+  return formatSessionIdHeadline(s.id);
+}
+
+function sessionIdShortHash(sessionId: string): string {
+  const dash = sessionId.indexOf("-");
+  if (dash < 0) return sessionId.slice(0, 8);
+  return sessionId.slice(dash + 1, dash + 9);
+}
+
+function CaptureSessionLockIcon() {
+  return (
+    <svg className="capture-session-lock-icon" viewBox="0 0 16 16" aria-hidden>
+      <path
+        fill="currentColor"
+        d="M4.5 7V5.5a3.5 3.5 0 1 1 7 0V7h.5A1.5 1.5 0 0 1 13.5 8.5v5A1.5 1.5 0 0 1 12 15H4a1.5 1.5 0 0 1-1.5-1.5v-5A1.5 1.5 0 0 1 4 7h.5Zm1.5 0h4V5.5a2 2 0 1 0-4 0V7Z"
+      />
+    </svg>
+  );
+}
+
 export default function CaptureSessionsDialog({
   open,
   sessions,
@@ -30,16 +71,36 @@ export default function CaptureSessionsDialog({
   const initialSelectedRef = useRef(initialSelected);
   initialSelectedRef.current = initialSelected;
 
-  /** 仅在弹窗打开时初始化勾选，避免父组件重渲染把全选状态冲掉 */
   useEffect(() => {
     if (open) setPicked(new Set(initialSelectedRef.current));
   }, [open]);
+
+  const orderedSessions = useMemo(() => {
+    const copy = [...sessions];
+    copy.sort((a, b) => {
+      const ta = a.started_at || a.id;
+      const tb = b.started_at || b.id;
+      return ta < tb ? 1 : ta > tb ? -1 : 0;
+    });
+    return copy;
+  }, [sessions]);
 
   if (!open) return null;
 
   const selectable = sessions.filter((s) => s.id !== lockedSessionId);
   const allSelectableChecked =
     selectable.length > 0 && selectable.every((s) => picked.has(s.id));
+
+  const pickedRows = sessions.filter((s) => picked.has(s.id));
+  const allPickedEmpty =
+    pickedRows.length > 0 && pickedRows.every((s) => s.transactionCount === 0);
+  const deleteBtnLabel = busy
+    ? "删除中…"
+    : allPickedEmpty && picked.size === 1
+      ? "删除 1 个空会话"
+      : allPickedEmpty && picked.size > 1
+        ? `删除 ${picked.size} 个空会话`
+        : `删除所选 (${picked.size})`;
 
   const toggle = (id: string) => {
     if (id === lockedSessionId) return;
@@ -71,36 +132,56 @@ export default function CaptureSessionsDialog({
           删除抓包会话
         </h4>
         <p className="modal-message" style={{ marginBottom: 12 }}>
-          勾选要删除的历史会话（不可恢复）。正在抓包的当前会话无法删除。
+          勾选要删除的历史会话（<span className="capture-session-irreversible">不可恢复</span>
+          ）。正在抓包的当前会话无法删除。
         </p>
         <div className="capture-session-pick">
-          <label className="check-label capture-session-pick-all">
-            <input
-              type="checkbox"
-              checked={allSelectableChecked}
-              onChange={toggleAll}
-              onClick={(e) => e.stopPropagation()}
-            />
-            全选可删项 ({selectable.length})
-          </label>
+          <div className="capture-session-pick-toolbar">
+            <label className="check-label capture-session-pick-all">
+              <input
+                type="checkbox"
+                className="capture-session-checkbox"
+                checked={allSelectableChecked}
+                disabled={!selectable.length}
+                onChange={toggleAll}
+                onClick={(e) => e.stopPropagation()}
+              />
+              全选可删项 ({selectable.length})
+            </label>
+          </div>
           <ul className="capture-session-pick-list">
-            {sessions.map((s) => {
+            {orderedSessions.map((s) => {
               const locked = s.id === lockedSessionId;
               return (
                 <li key={s.id}>
-                  <label className={`capture-session-pick-row${locked ? " locked" : ""}`}>
+                  <label
+                    className={`capture-session-pick-row${locked ? " capture-session-pick-row--locked" : ""}`}
+                  >
                     <input
                       type="checkbox"
+                      className="capture-session-checkbox"
                       checked={picked.has(s.id)}
                       disabled={locked}
                       onChange={() => toggle(s.id)}
                     />
-                    <span className="capture-session-pick-meta">
-                      <strong>{s.transactionCount} 条</strong>
-                      {s.label ? ` · ${s.label}` : null}
-                      <span className="hint"> · {s.id}</span>
+                    <span className="capture-session-pick-main">
+                      <span
+                        className={`capture-session-count-badge${s.transactionCount === 0 ? " is-empty" : ""}`}
+                      >
+                        {s.transactionCount} 条
+                      </span>
+                      <span className="capture-session-pick-time">{formatSessionListTime(s)}</span>
+                      {s.label ? <span className="capture-session-pick-label">{s.label}</span> : null}
+                      <span className="capture-session-pick-id" title={s.id}>
+                        {sessionIdShortHash(s.id)}
+                      </span>
                     </span>
-                    {locked ? <span className="hint warn">抓包中</span> : null}
+                    {locked ? (
+                      <span className="capture-session-locked-tag">
+                        <CaptureSessionLockIcon />
+                        进行中，不可删除
+                      </span>
+                    ) : null}
                   </label>
                 </li>
               );
@@ -108,16 +189,16 @@ export default function CaptureSessionsDialog({
           </ul>
         </div>
         <div className="modal-actions">
-          <button type="button" className="nav-btn" onClick={onCancel}>
+          <button type="button" className="modal-btn-cancel" onClick={onCancel}>
             取消
           </button>
           <button
             type="button"
-            className="primary danger"
+            className="primary danger capture-session-delete-btn"
             disabled={busy || picked.size === 0}
             onClick={() => onConfirm([...picked])}
           >
-            {busy ? "删除中…" : `删除所选 (${picked.size})`}
+            {deleteBtnLabel}
           </button>
         </div>
       </div>

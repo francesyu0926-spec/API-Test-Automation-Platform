@@ -1,6 +1,11 @@
 import { useMemo, useState } from "react";
+import { FixedSizeList, type ListChildComponentProps } from "react-window";
 
 import type { HttpBenchmarkReport, HttpBenchmarkSample } from "../../shared/apiWorkbenchTypes";
+
+const ROW_HEIGHT = 40;
+const VIEWPORT_HEIGHT = 400;
+const VIRTUAL_MIN_ROWS = 48;
 
 type Props = {
   report: HttpBenchmarkReport;
@@ -24,26 +29,94 @@ function sampleNote(s: HttpBenchmarkSample): string {
   return "成功";
 }
 
-export default function BenchmarkSampleTable({ report, limit = 50 }: Props) {
+function SampleRow({
+  index,
+  style,
+  data,
+}: ListChildComponentProps<{
+  rows: HttpBenchmarkSample[];
+  maxDur: number;
+  hasFailures: boolean;
+}>) {
+  const { rows, maxDur, hasFailures } = data;
+  const s = rows[index];
+  const failed = sampleFailed(s);
+  const statusOk = s.status >= 200 && s.status < 300;
+  const note = sampleNote(s);
+  return (
+    <div
+      style={style}
+      className={`virtual-sample-row loadtest-samples-row${failed ? " loadtest-samples-row--fail" : ""}${
+        s.warmup ? " loadtest-samples-row--warmup" : ""
+      }`}
+    >
+      <span className="virtual-sample-cell virtual-sample-cell--idx">{s.index + 1}</span>
+      <span className="virtual-sample-cell">
+        <span className={`badge ${failed ? "failed" : "passed"}`}>{failed ? "失败" : "成功"}</span>
+      </span>
+      <span className="virtual-sample-cell virtual-sample-cell--code">
+        {s.status > 0 ? (
+          <span
+            className={`loadtest-samples-status${statusOk && !failed ? " loadtest-samples-status--ok" : " loadtest-samples-status--err"}`}
+          >
+            {s.status}
+          </span>
+        ) : (
+          "—"
+        )}
+      </span>
+      <span className="virtual-sample-cell virtual-sample-cell--dur">
+        <span className="loadtest-samples-dur">{s.durationMs} ms</span>
+        <span className="loadtest-samples-dur-track" aria-hidden>
+          <span
+            className="loadtest-samples-dur-bar"
+            style={{ width: `${Math.min(100, (s.durationMs / maxDur) * 100)}%` }}
+          />
+        </span>
+      </span>
+      <span className="virtual-sample-cell">{formatBytes(s.bodySize)}</span>
+      {hasFailures ? (
+        <span className="virtual-sample-cell virtual-sample-cell--note">
+          {failed || s.warmup ? note : "—"}
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
+export default function BenchmarkSampleTable({ report }: Props) {
   const [showWarmup, setShowWarmup] = useState(false);
 
-  const { rows, warmupCount, maxDur, hasFailures, method, url } = useMemo(() => {
+  const { rows, warmupCount, maxDur, hasFailures, method, url, useVirtual } = useMemo(() => {
     const all = report.samples;
     const warmup = all.filter((s) => s.warmup);
     const measured = all.filter((s) => !s.warmup);
     const pool = showWarmup ? all : measured;
     const sorted = [...pool].sort((a, b) => a.index - b.index);
-    const rows = sorted.slice(-limit);
     const maxDur = Math.max(...measured.map((s) => s.durationMs), 1);
     return {
-      rows,
+      rows: sorted,
       warmupCount: warmup.length,
       maxDur,
       hasFailures: measured.some(sampleFailed),
       method: report.request.method,
       url: report.request.url,
+      useVirtual: sorted.length >= VIRTUAL_MIN_ROWS,
     };
-  }, [report, limit, showWarmup]);
+  }, [report, showWarmup]);
+
+  const listHeight = Math.min(VIEWPORT_HEIGHT, Math.max(ROW_HEIGHT * 6, rows.length * ROW_HEIGHT));
+
+  const head = (
+    <div className="virtual-sample-head benchmark-sample-head" role="row">
+      <span className="virtual-sample-cell virtual-sample-cell--idx">序号</span>
+      <span className="virtual-sample-cell">结果</span>
+      <span className="virtual-sample-cell virtual-sample-cell--code">状态码</span>
+      <span className="virtual-sample-cell virtual-sample-cell--dur">耗时</span>
+      <span className="virtual-sample-cell">响应大小</span>
+      {hasFailures ? <span className="virtual-sample-cell virtual-sample-cell--note">说明</span> : null}
+    </div>
+  );
 
   return (
     <section className="loadtest-samples-card" aria-labelledby="loadtest-samples-title">
@@ -58,7 +131,9 @@ export default function BenchmarkSampleTable({ report, limit = 50 }: Props) {
           </p>
         </div>
         <div className="loadtest-samples-toolbar">
-          <span className="hint">显示 {rows.length} 条</span>
+          <span className="hint">
+            {useVirtual ? `虚拟列表 ${rows.length} 条` : `显示 ${rows.length} 条`}
+          </span>
           {warmupCount > 0 ? (
             <label className="loadtest-samples-warmup-toggle">
               <input
@@ -72,65 +147,23 @@ export default function BenchmarkSampleTable({ report, limit = 50 }: Props) {
         </div>
       </header>
 
-      <div className="loadtest-samples-table-wrap">
-        <table className="loadtest-samples-table">
-          <thead>
-            <tr>
-              <th>序号</th>
-              <th>结果</th>
-              <th>状态码</th>
-              <th>耗时</th>
-              <th>响应大小</th>
-              {hasFailures ? <th>说明</th> : null}
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((s) => {
-              const failed = sampleFailed(s);
-              const statusOk = s.status >= 200 && s.status < 300;
-              const note = sampleNote(s);
-              return (
-                <tr
-                  key={s.index}
-                  className={`loadtest-samples-row${failed ? " loadtest-samples-row--fail" : ""}${
-                    s.warmup ? " loadtest-samples-row--warmup" : ""
-                  }`}
-                >
-                  <td className="loadtest-samples-idx">{s.index + 1}</td>
-                  <td>
-                    <span className={`badge ${failed ? "failed" : "passed"}`}>
-                      {failed ? "失败" : "成功"}
-                    </span>
-                  </td>
-                  <td>
-                    {s.status > 0 ? (
-                      <span
-                        className={`loadtest-samples-status${statusOk && !failed ? " loadtest-samples-status--ok" : " loadtest-samples-status--err"}`}
-                      >
-                        {s.status}
-                      </span>
-                    ) : (
-                      <span className="hint">—</span>
-                    )}
-                  </td>
-                  <td className="loadtest-samples-dur-cell">
-                    <span className="loadtest-samples-dur">{s.durationMs} ms</span>
-                    <span className="loadtest-samples-dur-track" aria-hidden>
-                      <span
-                        className="loadtest-samples-dur-bar"
-                        style={{ width: `${Math.min(100, (s.durationMs / maxDur) * 100)}%` }}
-                      />
-                    </span>
-                  </td>
-                  <td className="loadtest-samples-size">{formatBytes(s.bodySize)}</td>
-                  {hasFailures ? (
-                    <td className="loadtest-samples-note">{failed || s.warmup ? note : "—"}</td>
-                  ) : null}
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
+      <div className="virtual-sample-table benchmark-sample-virtual">
+        {head}
+        {rows.length === 0 ? (
+          <p className="hint loadtest-samples-empty">无样本</p>
+        ) : (
+          <FixedSizeList
+            className="virtual-sample-list"
+            height={listHeight}
+            width="100%"
+            itemCount={rows.length}
+            itemSize={ROW_HEIGHT}
+            itemData={{ rows, maxDur, hasFailures }}
+            overscanCount={useVirtual ? 10 : 4}
+          >
+            {SampleRow}
+          </FixedSizeList>
+        )}
       </div>
     </section>
   );

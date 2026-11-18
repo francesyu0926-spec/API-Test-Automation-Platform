@@ -1,9 +1,12 @@
+import { repairJtlTextField } from "./jtlTextRepair";
+
 export type JtlSample = {
   timeStamp: number;
   elapsed: number;
   label: string;
   responseCode: string;
   responseMessage: string;
+  failureMessage: string;
   threadName: string;
   success: boolean;
   bytes: number;
@@ -20,7 +23,7 @@ export type JtlParseResult = {
   errors: string[];
 };
 
-function parseCsvLine(line: string): string[] {
+export function parseCsvLine(line: string): string[] {
   const out: string[] = [];
   let cur = "";
   let inQuote = false;
@@ -56,7 +59,7 @@ function parseNum(raw: string, fallback = 0): number {
   return Number.isFinite(n) ? n : fallback;
 }
 
-const JTL_COLUMNS = [
+export const JTL_COLUMNS = [
   "timeStamp",
   "elapsed",
   "label",
@@ -76,6 +79,37 @@ const JTL_COLUMNS = [
   "Connect",
 ] as const;
 
+export function buildJtlColumnIndex(headerCells: string[]): Map<string, number> {
+  const colIndex = new Map<string, number>();
+  headerCells.forEach((name, i) => colIndex.set(name.trim(), i));
+  return colIndex;
+}
+
+export function parseJtlSampleFromCells(cells: string[], colIndex: Map<string, number>): JtlSample | null {
+  if (!cells.length || cells.every((c) => !c.trim())) return null;
+  const idx = (name: string, fallback: number) => colIndex.get(name) ?? fallback;
+  const get = (name: string) => cells[idx(name, -1)] ?? "";
+  const label = repairJtlTextField(get("label").trim());
+  if (!label) return null;
+  return {
+    timeStamp: parseNum(get("timeStamp")),
+    elapsed: parseNum(get("elapsed")),
+    label,
+    responseCode: get("responseCode").trim(),
+    responseMessage: repairJtlTextField(get("responseMessage").trim()),
+    failureMessage: repairJtlTextField(get("failureMessage").trim()),
+    threadName: repairJtlTextField(get("threadName").trim()),
+    success: parseBool(get("success")),
+    bytes: parseNum(get("bytes")),
+    sentBytes: parseNum(get("sentBytes")),
+    grpThreads: parseNum(get("grpThreads"), 1),
+    allThreads: parseNum(get("allThreads"), 1),
+    url: get("URL").trim(),
+    latency: parseNum(get("Latency"), parseNum(get("elapsed"))),
+    connect: parseNum(get("Connect")),
+  };
+}
+
 export function parseJtlCsv(text: string): JtlParseResult {
   const errors: string[] = [];
   const lines = text.replace(/^\uFEFF/, "").split(/\r?\n/).filter((l) => l.trim());
@@ -84,42 +118,17 @@ export function parseJtlCsv(text: string): JtlParseResult {
   }
 
   const headerCells = parseCsvLine(lines[0]).map((c) => c.trim());
-  const colIndex = new Map<string, number>();
-  headerCells.forEach((name, i) => colIndex.set(name, i));
+  const colIndex = buildJtlColumnIndex(headerCells);
 
   const missing = JTL_COLUMNS.filter((c) => !colIndex.has(c));
   if (missing.length > 4) {
     errors.push(`未识别的 JTL 表头（需 JMeter CSV）：${headerCells.slice(0, 8).join(", ")}…`);
   }
 
-  const idx = (name: string, fallback: number) => colIndex.get(name) ?? fallback;
-
   const samples: JtlSample[] = [];
   for (let lineNo = 1; lineNo < lines.length; lineNo++) {
-    const cells = parseCsvLine(lines[lineNo]);
-    if (!cells.length || cells.every((c) => !c.trim())) continue;
-
-    const get = (name: string) => cells[idx(name, -1)] ?? "";
-
-    const label = get("label").trim();
-    if (!label) continue;
-
-    samples.push({
-      timeStamp: parseNum(get("timeStamp")),
-      elapsed: parseNum(get("elapsed")),
-      label,
-      responseCode: get("responseCode").trim(),
-      responseMessage: get("responseMessage").trim(),
-      threadName: get("threadName").trim(),
-      success: parseBool(get("success")),
-      bytes: parseNum(get("bytes")),
-      sentBytes: parseNum(get("sentBytes")),
-      grpThreads: parseNum(get("grpThreads"), 1),
-      allThreads: parseNum(get("allThreads"), 1),
-      url: get("URL").trim(),
-      latency: parseNum(get("Latency"), parseNum(get("elapsed"))),
-      connect: parseNum(get("Connect")),
-    });
+    const sample = parseJtlSampleFromCells(parseCsvLine(lines[lineNo]), colIndex);
+    if (sample) samples.push(sample);
   }
 
   if (!samples.length) {

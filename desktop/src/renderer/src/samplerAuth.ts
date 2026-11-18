@@ -33,6 +33,32 @@ export function coalesceAuthVariables(variables: Record<string, string>): Record
   return out;
 }
 
+/** 发送请求时必须带字面量的鉴权头（与 jmxExport.mergeAuthHeaders 一致） */
+export const AUTH_SEND_HEADER_KEYS = ["token", "secret", "terminalenv"] as const;
+
+/** 将 token / secret / terminalenv 从环境并入最终请求头（覆盖未替换的 {{var}}） */
+export function applyAuthHeadersFromEnv(
+  headers: Record<string, string>,
+  env: Record<string, string>,
+): Record<string, string> {
+  const auth = coalesceAuthVariables(env);
+  const out = { ...headers };
+  for (const key of AUTH_SEND_HEADER_KEYS) {
+    const existingKey = Object.keys(out).find((k) => k.toLowerCase() === key);
+    let value = existingKey ? String(out[existingKey]) : "";
+    const trimmed = value.trim();
+    if (!trimmed || /\{\{\w+\}\}/.test(trimmed)) {
+      const fromEnv = auth[key]?.trim();
+      if (fromEnv) value = fromEnv;
+    } else {
+      value = trimmed;
+    }
+    if (existingKey && existingKey !== key) delete out[existingKey];
+    if (value.trim()) out[key] = value.trim();
+  }
+  return out;
+}
+
 /** Header 名 → 环境变量名（小写匹配 Header） */
 const AUTH_HEADER_TO_VAR: Record<string, string> = {
   token: "token",

@@ -20,7 +20,7 @@
 ## 工作区路径
 
 1. 环境变量 `ATP_REPO_ROOT`
-2. 否则向上查找含 `atp/cli.py` 的目录（默认 `desktop/..`）
+2. 主进程启动时从 `out/main` 所在位置、`process.cwd()` 及其上级等多候选路径查找含 `atp/cli.py` 的目录（兼容在仓库根或 `desktop` 下执行 `npm run dev`）
 
 ## 抓包（已实现）
 

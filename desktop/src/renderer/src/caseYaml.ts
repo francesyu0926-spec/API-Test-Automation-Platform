@@ -129,9 +129,15 @@ export function captureTxToCaseYaml(tx: unknown): string {
   return lines.join("\n");
 }
 
+/** 工作台保存用例时的默认文件名（cases/*.yaml，不含扩展名） */
+export function workbenchDraftCaseStem(draft: WorkbenchDraft): string {
+  const url = buildUrl(draft.url, draft.query);
+  return slugCaseName(draft.name?.trim() || caseNameFromUrl(url));
+}
+
 export function workbenchDraftToCaseYaml(draft: WorkbenchDraft, responseStatus?: number): string {
   const url = buildUrl(draft.url, draft.query);
-  const name = slugCaseName(draft.name?.trim() || caseNameFromUrl(url));
+  const name = workbenchDraftCaseStem(draft);
   const method = draft.method.toUpperCase();
   const headers = headersForSend(draft);
   const body =

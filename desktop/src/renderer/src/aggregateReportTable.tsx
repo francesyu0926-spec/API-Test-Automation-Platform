@@ -1,4 +1,6 @@
 import type { HttpBenchmarkReport } from "../../shared/apiWorkbenchTypes";
+import type { PercentileApproxMeta } from "../../shared/jtlStreamAggregator";
+import { PercentileTh, percentileApproxTooltip } from "./percentileApprox";
 
 export type AggregateReportRow = {
   label: string;

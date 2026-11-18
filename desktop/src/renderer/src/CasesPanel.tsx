@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import ConfirmDialog from "./ConfirmDialog";
 import ExportJmxDialog from "./ExportJmxDialog";
@@ -12,6 +12,8 @@ import {
 import { buildUrl, normalizeRawBodyDraft, savedRequestToDraft } from "./apiWorkbenchModel";
 import { newCaseYaml } from "./newCaseTemplate";
 import type { SavedApiRequest, WorkbenchDraft } from "../../shared/apiWorkbenchTypes";
+import { applyImportedCurlAuth } from "./samplerAuth";
+import { useProjectEnvOptional } from "./ProjectEnvContext";
 
 type CollectionRow = {
   collectionId: string;
@@ -31,9 +33,18 @@ type Props = {
   project: string;
   projectDisplayName?: string;
   cases: string[];
+  /** 与 listProjectAssets 一并读入的 YAML 正文 */
+  caseTexts?: Record<string, string>;
+  /** 父级 assets 已与当前 project 对齐，再自动读 YAML */
+  casesReady?: boolean;
+  assetsLoading?: boolean;
+  /** 由 App 持有选中项，避免面板内 effect 抢选中 */
+  activeCaseName: string | null;
+  onActiveCaseNameChange: (name: string | null) => void;
   onRefresh: () => void;
+  onNotify?: (text: string) => void;
   onCasePreviewChange?: (ctx: { caseName: string | null; yaml: string }) => void;
-  onOpenInWorkbench?: (draft: WorkbenchDraft) => void;
+  onOpenInWorkbench?: (draft: WorkbenchDraft, opts?: { requestId?: string; collectionId?: string }) => void;
 };
 
 function slugFileName(name: string): string {
@@ -50,11 +61,17 @@ export default function CasesPanel({
   project,
   projectDisplayName,
   cases,
+  caseTexts = {},
+  casesReady = true,
+  assetsLoading = false,
+  activeCaseName,
+  onActiveCaseNameChange,
   onRefresh,
+  onNotify,
   onCasePreviewChange,
   onOpenInWorkbench,
 }: Props) {
-  const [selectedCase, setSelectedCase] = useState<string | null>(null);
+  const projectEnv = useProjectEnvOptional();
   const [yamlText, setYamlText] = useState("");
   const [editing, setEditing] = useState(false);
   const [editDraft, setEditDraft] = useState("");
@@ -73,8 +90,26 @@ export default function CasesPanel({
   const [collectionRows, setCollectionRows] = useState<CollectionRow[]>([]);
   const [listMode, setListMode] = useState<ListMode>("yaml");
   const [selectedCollectionKey, setSelectedCollectionKey] = useState<string | null>(null);
+  const caseLoadGenRef = useRef(0);
+  const CASE_READ_TIMEOUT_MS = 20_000;
+  const casesRef = useRef(cases);
+  casesRef.current = cases;
+  const caseTextsRef = useRef(caseTexts);
+  caseTextsRef.current = caseTexts;
+  const yamlTextRef = useRef(yamlText);
+  yamlTextRef.current = yamlText;
 
   const CASE_LIST_PAGE = 20;
+  const casesKey = useMemo(() => [...cases].sort().join("\u001f"), [cases]);
+
+  const activeCase = useMemo(() => {
+    if (!cases.length) return null;
+    if (activeCaseName && cases.includes(activeCaseName)) return activeCaseName;
+    return cases[0] ?? null;
+  }, [activeCaseName, cases, casesKey]);
+
+  const activeCaseRef = useRef(activeCase);
+  activeCaseRef.current = activeCase;
 
   const loadCollectionRows = useCallback(async () => {
     if (!project) {
@@ -92,58 +127,142 @@ export default function CasesPanel({
     setCollectionRows(rows);
   }, [project]);
 
+  const resolvedCaseYaml = useMemo(() => {
+    if (!activeCase) return "";
+    if (editing) return editDraft;
+    const bundled = caseTexts[activeCase];
+    if (bundled !== undefined) return bundled;
+    return yamlText;
+  }, [activeCase, caseTexts, editing, editDraft, yamlText]);
+
   const selectedCaseSummary = useMemo(() => {
-    if (!yamlText.trim()) return null;
-    const draft = caseYamlToWorkbenchDraft(yamlText);
+    if (!resolvedCaseYaml.trim()) return null;
+    const draft = caseYamlToWorkbenchDraft(resolvedCaseYaml);
     if (!draft) return null;
     return {
       method: draft.method,
       url: buildUrl(draft.url, draft.query),
     };
-  }, [yamlText]);
+  }, [resolvedCaseYaml]);
+
+  const applyCaseYaml = useCallback((caseName: string, text: string | null | undefined) => {
+    if (activeCaseRef.current !== caseName) return;
+    setYamlText(text ?? "");
+    setEditDraft(text ?? "");
+    setEditing(false);
+    setCaseLoading(false);
+    if (text == null || text === "") {
+      const msg = `无法读取用例：${caseName}.yaml（项目 ${project}）`;
+      setMessage(msg);
+      onNotify?.(msg);
+      window.setTimeout(() => setMessage(""), 6000);
+    }
+  }, [project, onNotify]);
 
   const loadCase = useCallback(
-    async (caseName: string) => {
+    async (caseName: string, opts?: { force?: boolean }) => {
       if (!project) return;
+      const list = casesRef.current;
+      if (
+        !opts?.force &&
+        activeCaseRef.current === caseName &&
+        yamlTextRef.current &&
+        list.includes(caseName)
+      ) {
+        return;
+      }
+      const cached = caseTextsRef.current[caseName];
+      if (cached !== undefined && !opts?.force) {
+        applyCaseYaml(caseName, cached);
+        return;
+      }
+      if (activeCaseRef.current !== caseName) return;
+      const gen = ++caseLoadGenRef.current;
+      setYamlText("");
+      setEditDraft("");
       setCaseLoading(true);
+      let finished = false;
+      const timer = window.setTimeout(() => {
+        if (finished || gen !== caseLoadGenRef.current) return;
+        finished = true;
+        applyCaseYaml(caseName, null);
+        const msg = `加载用例超时（${caseName}）`;
+        onNotify?.(msg);
+      }, CASE_READ_TIMEOUT_MS);
       try {
-        const text = await window.atp.readFile(`projects/${project}/cases/${caseName}.yaml`);
-        setSelectedCase(caseName);
-        setYamlText(text ?? "");
-        setEditDraft(text ?? "");
-        setEditing(false);
+        const text = await window.atp.readProjectCase(project, caseName);
+        if (finished || gen !== caseLoadGenRef.current) return;
+        finished = true;
+        applyCaseYaml(caseName, text);
+      } catch (err) {
+        if (finished || gen !== caseLoadGenRef.current) return;
+        finished = true;
+        applyCaseYaml(caseName, null);
+        onNotify?.(err instanceof Error ? err.message : "加载用例失败");
       } finally {
-        setCaseLoading(false);
+        window.clearTimeout(timer);
+        if (gen === caseLoadGenRef.current) setCaseLoading(false);
       }
     },
-    [project],
+    [project, applyCaseYaml, onNotify],
+  );
+
+  const selectCase = useCallback(
+    (caseName: string) => {
+      if (!casesRef.current.includes(caseName)) return;
+      caseLoadGenRef.current += 1;
+      setEditing(false);
+      onActiveCaseNameChange(caseName);
+      const cached = caseTextsRef.current[caseName];
+      if (cached !== undefined) {
+        setYamlText(cached);
+        setEditDraft(cached);
+        setCaseLoading(false);
+        return;
+      }
+      setYamlText("");
+      setEditDraft("");
+      setCaseLoading(true);
+      void loadCase(caseName, { force: true });
+    },
+    [loadCase, onActiveCaseNameChange],
   );
 
   useEffect(() => {
-    setSelectedCase(null);
+    caseLoadGenRef.current += 1;
+    setCaseLoading(false);
     setYamlText("");
     setEditing(false);
     setSelectedCollectionKey(null);
-    void loadCollectionRows();
+    const t = window.setTimeout(() => {
+      void loadCollectionRows();
+    }, 0);
+    return () => window.clearTimeout(t);
   }, [project, loadCollectionRows]);
-
-  useEffect(() => {
-    void loadCollectionRows();
-  }, [cases, loadCollectionRows]);
 
   useEffect(() => {
     if (cases.length) return;
     if (collectionRows.length) setListMode("collection");
   }, [project, cases.length, collectionRows.length]);
 
+  /** 切换选中时同步 YAML（优先 caseTexts） */
   useEffect(() => {
-    if (selectedCase && cases.includes(selectedCase)) return;
-    if (cases.length) void loadCase(cases[0]);
-    else {
-      setSelectedCase(null);
-      setYamlText("");
+    const target = activeCase;
+    if (!target || !cases.includes(target)) return;
+    const bundled = caseTexts[target];
+    if (bundled !== undefined) {
+      setYamlText(bundled);
+      setEditDraft(bundled);
+      setEditing(false);
+      setCaseLoading(false);
+      return;
     }
-  }, [cases, selectedCase, loadCase]);
+    if (yamlText.trim() && activeCaseRef.current === target) return;
+    setYamlText("");
+    setEditDraft("");
+    setCaseLoading(true);
+    void loadCase(target, { force: true });
+  }, [activeCase, caseTexts, cases, loadCase]);
 
   const filteredCases = useMemo(() => {
     const q = caseFilter.trim().toLowerCase();
@@ -185,8 +304,8 @@ export default function CasesPanel({
   }, [listPage, listPageCount]);
 
   useEffect(() => {
-    onCasePreviewChange?.({ caseName: selectedCase, yaml: yamlText });
-  }, [selectedCase, yamlText, onCasePreviewChange]);
+    onCasePreviewChange?.({ caseName: activeCase, yaml: resolvedCaseYaml });
+  }, [activeCase, resolvedCaseYaml, onCasePreviewChange]);
 
   useEffect(() => {
     if (listMode !== "collection" || !filteredCollectionRows.length) return;
@@ -199,7 +318,7 @@ export default function CasesPanel({
   const openCollectionInWorkbench = (row: CollectionRow) => {
     if (!onOpenInWorkbench) return;
     const draft = normalizeRawBodyDraft(savedRequestToDraft(row.request));
-    onOpenInWorkbench(draft);
+    onOpenInWorkbench(draft, { requestId: row.request.id, collectionId: row.collectionId });
   };
   // onCasePreviewChange 在 App 内做浅比较，避免重复 setState
 
@@ -220,7 +339,7 @@ export default function CasesPanel({
       const reqs = col?.requests ?? [];
       if (!reqs.length) {
         showMsg(
-          "暂无可导出内容：请新建 YAML 用例，或在工作台「保存为用例」/「保存到集合」。南财行情请切换到项目「终端」或「南财行情」。",
+          "暂无可导出内容：请新建 YAML 用例，或在工作台「保存到集合」（会同步生成用例）。南财行情请切换到项目「终端」或「南财行情」。",
         );
         return;
       }
@@ -232,8 +351,8 @@ export default function CasesPanel({
 
   const collectJmxCases = async (mode: JmxExportMode): Promise<Array<{ label: string; yaml: string }>> => {
     if (mode === "current") {
-      if (!selectedCase || !yamlText.trim()) return [];
-      return [{ label: selectedCase, yaml: yamlText }];
+      if (!activeCase || !resolvedCaseYaml.trim()) return [];
+      return [{ label: activeCase, yaml: resolvedCaseYaml }];
     }
     const out: Array<{ label: string; yaml: string }> = [];
     for (const c of cases) {
@@ -322,9 +441,9 @@ export default function CasesPanel({
   };
 
   const onSave = async () => {
-    if (!project || !selectedCase) return;
+    if (!project || !activeCase) return;
     setSaving(true);
-    const res = await window.atp.updateProjectCase(project, selectedCase, editDraft);
+    const res = await window.atp.updateProjectCase(project, activeCase, editDraft);
     setSaving(false);
     if (!res.ok) {
       showMsg(res.error ?? "保存失败");
@@ -337,9 +456,9 @@ export default function CasesPanel({
   };
 
   const onDelete = async () => {
-    if (!project || !selectedCase) return;
+    if (!project || !activeCase) return;
     setSaving(true);
-    const res = await window.atp.deleteProjectCase(project, selectedCase);
+    const res = await window.atp.deleteProjectCase(project, activeCase);
     setSaving(false);
     setPendingDelete(false);
     if (!res.ok) {
@@ -347,10 +466,12 @@ export default function CasesPanel({
       return;
     }
     showMsg("已删除用例");
-    setSelectedCase(null);
+    const remain = cases.filter((c) => c !== activeCase);
+    onActiveCaseNameChange(remain[0] ?? null);
     setYamlText("");
     setEditing(false);
     onRefresh();
+    void loadCollectionRows();
   };
 
   if (!project) {
@@ -358,7 +479,7 @@ export default function CasesPanel({
       <section className="card cases-panel-shell">
         <div className="panel-empty-state panel-empty-state--compact">
           <p className="panel-empty-title">未选择项目</p>
-          <p className="panel-empty-hint">请在上方下拉框选择项目，或新建项目后再管理用例。</p>
+          <p className="panel-empty-hint">请在左侧侧栏选择工作区项目，或新建项目后再管理用例。</p>
         </div>
       </section>
     );
@@ -433,8 +554,12 @@ export default function CasesPanel({
                   <button
                     key={c}
                     type="button"
-                    className={`case-list-row${selectedCase === c ? " active" : ""}`}
-                    onClick={() => void loadCase(c)}
+                    className={`case-list-row${activeCase === c ? " active" : ""}`}
+                    onMouseDown={(e) => {
+                      if (e.button !== 0) return;
+                      e.preventDefault();
+                      selectCase(c);
+                    }}
                     title={c}
                   >
                     {c}
@@ -519,7 +644,11 @@ export default function CasesPanel({
           </aside>
 
           <div className="cases-panel-detail loading-host">
-            <LoadingOverlay show={caseLoading} label="加载用例…" />
+            <LoadingOverlay show={assetsLoading && !casesReady} label="加载项目资源…" block={false} />
+            <LoadingOverlay
+              show={caseLoading && !resolvedCaseYaml.trim() && Boolean(activeCase)}
+              label="加载用例…"
+            />
             {listMode === "collection" && selectedCollectionRow && (
               <>
                 <div className="cases-panel-detail-head cases-panel-detail-head--inline">
@@ -551,7 +680,7 @@ export default function CasesPanel({
                 </pre>
               </>
             )}
-            {listMode === "yaml" && !selectedCase && !caseLoading && (
+            {listMode === "yaml" && !activeCase && !cases.length && (
               <div className="cases-panel-detail-empty">
                 <p className="cases-panel-detail-empty-title">选择左侧用例</p>
                 <p className="hint">预览 YAML、编辑或在 API 工作台打开</p>
@@ -563,11 +692,11 @@ export default function CasesPanel({
                 <p className="hint">来自工作台「保存到集合」，与 YAML 用例相互独立</p>
               </div>
             )}
-            {listMode === "yaml" && selectedCase && yamlText !== "" && (
+            {listMode === "yaml" && activeCase && (
               <>
                 <div className="cases-panel-detail-head">
                   <div className="cases-panel-detail-title-block">
-                    <h4 className="cases-panel-detail-name">{selectedCase}</h4>
+                    <h4 className="cases-panel-detail-name">{activeCase}</h4>
                     {selectedCaseSummary && (
                       <p className="cases-panel-detail-request" title={selectedCaseSummary.url}>
                         <span
@@ -588,12 +717,27 @@ export default function CasesPanel({
                               type="button"
                               className="primary nav-btn--compact"
                               onClick={() => {
-                                const draft = caseYamlToWorkbenchDraft(yamlText);
-                                if (!draft) {
-                                  showMsg("无法解析用例 YAML");
-                                  return;
-                                }
-                                onOpenInWorkbench(draft);
+                                void (async () => {
+                                  const draft = caseYamlToWorkbenchDraft(resolvedCaseYaml);
+                                  if (!draft) {
+                                    const msg = "无法解析用例 YAML";
+                                    showMsg(msg);
+                                    onNotify?.(msg);
+                                    return;
+                                  }
+                                  const env = projectEnv?.envName ?? "dev";
+                                  let openDraft = draft;
+                                  try {
+                                    const synced = await applyImportedCurlAuth(project, env, draft);
+                                    openDraft = synced.draft;
+                                    await projectEnv?.refreshVariables();
+                                  } catch (err) {
+                                    onNotify?.(
+                                      err instanceof Error ? err.message : "同步鉴权变量到环境失败",
+                                    );
+                                  }
+                                  onOpenInWorkbench(openDraft);
+                                })();
                               }}
                             >
                               在工作台打开
@@ -653,7 +797,11 @@ export default function CasesPanel({
                       onChange={(e) => setEditDraft(e.target.value)}
                     />
                   ) : (
-                    <pre className="case-yaml-pre cases-panel-yaml-pre">{yamlText}</pre>
+                    <pre key={activeCase} className="case-yaml-pre cases-panel-yaml-pre">
+                      {resolvedCaseYaml.trim()
+                        ? resolvedCaseYaml
+                        : "（文件为空或无法读取，请检查 projects/…/cases 下的 YAML）"}
+                    </pre>
                   )}
                 </div>
               </>
@@ -704,7 +852,7 @@ export default function CasesPanel({
                     onRefresh();
                     if (res.caseName) {
                       setEditing(true);
-                      setSelectedCase(res.caseName);
+                      onActiveCaseNameChange(res.caseName);
                       setYamlText(yaml);
                       setEditDraft(yaml);
                     }
@@ -738,7 +886,7 @@ export default function CasesPanel({
       <ConfirmDialog
         open={pendingDelete}
         title="删除用例"
-        message={`将删除 cases/${selectedCase}.yaml，并从所有套件中移除引用。不可恢复。`}
+        message={`将删除 cases/${activeCase}.yaml，并从所有套件中移除引用。不可恢复。`}
         confirmLabel="删除"
         danger
         onCancel={() => setPendingDelete(false)}

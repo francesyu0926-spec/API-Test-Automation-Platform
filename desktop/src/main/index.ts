@@ -18,9 +18,20 @@ import { cancelHttpBenchmark, runHttpBenchmark } from "./httpBenchmark";
 import { sendHttpRequest } from "./httpRequest";
 import * as wsSession from "./wsSession";
 import type { WsConnectPayload, WsSendPayload } from "../shared/apiWorkbenchTypes";
+import {
+  findJmeterResultJtlFiles,
+  findJmxFilesNearJtl,
+  listJmxFilesInProject,
+  listJsonFilesInProjectSubdir,
+} from "./projectFs";
+import { aggregateJtlFile } from "./jtlStreamParse";
+import { archiveJtlFileToPerf } from "./jtlArchive";
 import * as perfReports from "./perfReportStore";
+import { openPdfInNewTab } from "./pdfViewer";
 import * as jmeterRunner from "./jmeterRunner";
-import { getRepoRoot, setRepoRoot } from "./repo";
+import { getRepoRoot, initRepoRoot, setRepoRoot } from "./repo";
+
+initRepoRoot(__filename);
 import type {
   ApiCollectionFile,
   HttpBenchmarkOptions,
@@ -271,6 +282,42 @@ ipcMain.handle("atp:savePerfReport", (e, projectId: string, report: HttpBenchmar
 ipcMain.handle("atp:listPerfReports", (_e, projectId: string, limit?: number) =>
   perfReports.listPerfReports(projectId, limit),
 );
+ipcMain.handle("atp:listProjectPerfJsonFiles", (_e, projectId: string) =>
+  listJsonFilesInProjectSubdir(projectId, "perf").then((r) => r.files),
+);
+ipcMain.handle("atp:findJmeterResultJtlFiles", (_e, projectId: string) =>
+  findJmeterResultJtlFiles(projectId),
+);
+ipcMain.handle("atp:findJmxFilesNearJtl", (_e, jtlPath: string) => findJmxFilesNearJtl(jtlPath));
+ipcMain.handle("atp:aggregateJtlFile", (_e, jtlPath: string, mode?: string) =>
+  aggregateJtlFile(jtlPath, mode as import("../shared/jtlStreamModes").JtlStreamModeId | undefined),
+);
+ipcMain.handle(
+  "atp:archiveJtlToPerfFromFile",
+  (_e, projectId: string, jtlPath: string, jmxPath?: string, mode?: string) =>
+    archiveJtlFileToPerf(
+      projectId,
+      jtlPath,
+      jmxPath,
+      mode as import("../shared/jtlStreamModes").JtlStreamModeId | undefined,
+    ),
+);
+ipcMain.handle("atp:listProjectJmxFiles", async (_e, projectId: string) => {
+  const { absoluteDir, files } = await listJmxFilesInProject(projectId);
+  return files.map((name) => path.join(absoluteDir, name));
+});
+ipcMain.handle("atp:listProjectsPerfCounts", async () => {
+  const projects = await atp.listProjects();
+  const out: Array<{ id: string; name: string; count: number }> = [];
+  for (const p of projects) {
+    const { files } = await listJsonFilesInProjectSubdir(p.id, "perf");
+    if (files.length > 0) {
+      out.push({ id: p.id, name: p.name, count: files.length });
+    }
+  }
+  out.sort((a, b) => b.count - a.count || a.id.localeCompare(b.id));
+  return out;
+});
 ipcMain.handle("atp:loadPerfReports", (_e, projectId: string, files: string[]) =>
   perfReports.loadPerfReports(projectId, files),
 );
@@ -279,6 +326,23 @@ ipcMain.handle(
   (e, projectId: string, visualHtml: string, suggestedFileName: string) => {
     const win = BrowserWindow.fromWebContents(e.sender) ?? BrowserWindow.getFocusedWindow() ?? null;
     return perfReports.exportPerfReportPdfDialog(projectId, visualHtml, suggestedFileName, win);
+  },
+);
+ipcMain.handle("atp:previewReportPdf", async (_e, visualHtml: string, suggestedFileName: string) => {
+  const built = await perfReports.previewReportPdfFromHtml(visualHtml, suggestedFileName);
+  if (!built.ok || !built.pdfPath) return built;
+  const opened = await openPdfInNewTab(built.pdfPath);
+  return { ...built, ...opened };
+});
+ipcMain.handle(
+  "atp:openPerfReportPdf",
+  async (_e, projectId: string, jsonFile: string, visualHtml: string, forceRegenerate?: boolean) => {
+    const ensured = await perfReports.ensurePerfReportPdf(projectId, jsonFile, visualHtml, {
+      forceRegenerate: Boolean(forceRegenerate),
+    });
+    if (!ensured.ok || !ensured.pdfPath) return ensured;
+    const opened = await openPdfInNewTab(ensured.pdfPath);
+    return { ...ensured, ...opened };
   },
 );
 ipcMain.handle("atp:getPerfReportsDir", (_e, projectId: string) =>
@@ -306,6 +370,9 @@ ipcMain.handle("atp:projectCaseExists", (_e, projectId: string, caseName: string
 ipcMain.handle("atp:deleteProjectCase", (_e, projectId: string, caseName: string) =>
   caseStore.deleteProjectCase(projectId, caseName),
 );
+ipcMain.handle("atp:readProjectCase", (_e, projectId: string, caseName: string) =>
+  caseStore.readProjectCase(projectId, caseName),
+);
 
 ipcMain.handle(
   "atp:writeRepoFile",
@@ -318,7 +385,11 @@ ipcMain.handle(
       }
       await fs.mkdir(path.dirname(full), { recursive: true });
       await fs.writeFile(full, content.endsWith("\n") ? content : `${content}\n`, "utf8");
-      return { ok: true, relativePath: path.relative(root, full).replace(/\\/g, "/") };
+      return {
+        ok: true,
+        relativePath: path.relative(root, full).replace(/\\/g, "/"),
+        absolutePath: full,
+      };
     } catch (e) {
       return { ok: false, error: e instanceof Error ? e.message : String(e) };
     }
@@ -336,6 +407,15 @@ ipcMain.handle(
     }
   },
 );
+
+ipcMain.handle("atp:statAbsoluteFile", async (_e, filePath: string): Promise<number | null> => {
+  try {
+    const st = await fs.stat(filePath);
+    return st.isFile() ? st.size : null;
+  } catch {
+    return null;
+  }
+});
 
 ipcMain.handle("atp:detectJmeter", (_e, jmeterHome?: string) => jmeterRunner.detectJmeter(jmeterHome));
 ipcMain.handle("atp:runJmeter", (e, opts: jmeterRunner.RunJmeterOptions) =>

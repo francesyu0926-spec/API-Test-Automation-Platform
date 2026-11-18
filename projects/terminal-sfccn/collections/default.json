@@ -84,84 +84,6 @@
       "bodyContentType": "application/json"
     },
     {
-      "id": "case:dayk",
-      "name": "dayk",
-      "folder": "项目用例",
-      "method": "POST",
-      "url": "https://terminal.sfccn.com/terminal/desk/quotes/api/dayk",
-      "headers": [
-        {
-          "key": "accept",
-          "value": "application/json",
-          "enabled": true
-        },
-        {
-          "key": "accept-language",
-          "value": "zh-CN",
-          "enabled": true
-        },
-        {
-          "key": "referer",
-          "value": "https://terminal.sfccn.com/terminal/desk/quotes/",
-          "enabled": true
-        },
-        {
-          "key": "sec-fetch-dest",
-          "value": "empty",
-          "enabled": true
-        },
-        {
-          "key": "sec-fetch-mode",
-          "value": "cors",
-          "enabled": true
-        },
-        {
-          "key": "sec-fetch-site",
-          "value": "same-origin",
-          "enabled": true
-        },
-        {
-          "key": "user-agent",
-          "value": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) sfc-connect/1.0.82 Chrome/114.0.5735.289 Electron/25.8.3 Safari/537.36",
-          "enabled": true
-        },
-        {
-          "key": "sec-ch-ua",
-          "value": "\"Not.A/Brand\";v=\"8\", \"Chromium\";v=\"114\"",
-          "enabled": true
-        },
-        {
-          "key": "sec-ch-ua-mobile",
-          "value": "?0",
-          "enabled": true
-        },
-        {
-          "key": "sec-ch-ua-platform",
-          "value": "\"Windows\"",
-          "enabled": true
-        },
-        {
-          "key": "secret",
-          "value": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJhdXRoMCIsImV4cCI6MTc5NTA1ODc3OSwidXNlciI6IntcImlkYWFzSWRcIjpcInVzLTQ0YTY2NDViODI3NTRkZWNiNjg5MTVhOWM0ZGU1ZDgyXCIsXCJsb2dpbkNvZGVcIjpcIjEzMjQ2ODI5ODI2XCIsXCJtZWV0aW5nWW5cIjowLFwibW9iaWxlXCI6XCIxMzI0NjgyOTgyNlwiLFwibmlja05hbWVcIjpcIuS9mei0neWKoFwiLFwic3RhdHVzXCI6NSxcInVzZXJJZFwiOjEwMDUxLFwieGN4T3BlbklkXCI6XCJvTVhnSTQ4czQ1R3ZXc2U2U1lsRUlud25pZzJrXCIsXCJ6bGJ4WW5cIjowfSJ9.NveTc59N4p03BB_VjhXDGlLkbBcfmDDekifwsAKTl-4",
-          "enabled": true
-        },
-        {
-          "key": "terminalenv",
-          "value": "prd",
-          "enabled": true
-        },
-        {
-          "key": "token",
-          "value": "{{token}}",
-          "enabled": true
-        }
-      ],
-      "query": [],
-      "bodyMode": "raw",
-      "body": "{\n  \"code\": \"000010.SZ\",\n  \"requestType\": 1,\n  \"subtype\": \"\",\n  \"datetime\": \"19900101\",\n  \"mode\": 0\n}",
-      "bodyContentType": "application/json"
-    },
-    {
       "id": "case:groupwithstockstree",
       "name": "groupwithstockstree",
       "folder": "项目用例",
@@ -393,6 +315,161 @@
       "query": [],
       "bodyMode": "raw",
       "body": "{\n  \"pageIndex\": 0,\n  \"pageSize\": 10,\n  \"sectors\": [\n    {\n      \"identifier\": \"沪深涨幅排名\",\n      \"code\": \"9E341731AEDFB798E050A8C05B01C2B2\",\n      \"field\": 12,\n      \"ascending\": false,\n      \"fields\": [\n        \"name\",\n        \"code\",\n        \"lastPrice\",\n        \"preClosePrice\",\n        \"changeRate\",\n        \"amount\",\n        \"volumeRatio\",\n        \"fiveMinRise\",\n        \"amplitudeRate\",\n        \"orderRatio\",\n        \"threeMinRise\"\n      ]\n    },\n    {\n      \"identifier\": \"沪深5分钟涨速排名\",\n      \"code\": \"9E341731AEDFB798E050A8C05B01C2B2\",\n      \"field\": 114,\n      \"ascending\": false,\n      \"fields\": [\n        \"name\",\n        \"code\",\n        \"lastPrice\",\n        \"preClosePrice\",\n        \"changeRate\",\n        \"amount\",\n        \"volumeRatio\",\n        \"fiveMinRise\",\n        \"amplitudeRate\",\n        \"orderRatio\",\n        \"threeMinRise\"\n      ]\n    },\n    {\n      \"identifier\": \"量比排名\",\n      \"code\": \"9E341731AEDFB798E050A8C05B01C2B2\",\n      \"field\": 21,\n      \"ascending\": false,\n      \"fields\": [\n        \"name\",\n        \"code\",\n        \"lastPrice\",\n        \"preClosePrice\",\n        \"changeRate\",\n        \"amount\",\n        \"volumeRatio\",\n        \"fiveMinRise\",\n        \"amplitudeRate\",\n        \"orderRatio\",\n        \"threeMinRise\"\n      ]\n    },\n    {\n      \"identifier\": \"沪深跌幅排名\",\n      \"code\": \"9E341731AEDFB798E050A8C05B01C2B2\",\n      \"field\": 12,\n      \"ascending\": true,\n      \"fields\": [\n        \"name\",\n        \"code\",\n        \"lastPrice\",\n        \"preClosePrice\",\n        \"changeRate\",\n        \"amount\",\n        \"volumeRatio\",\n        \"fiveMinRise\",\n        \"amplitudeRate\",\n        \"orderRatio\",\n        \"threeMinRise\"\n      ]\n    },\n    {\n      \"identifier\": \"沪深5分钟跌速排名\",\n      \"code\": \"9E341731AEDFB798E050A8C05B01C2B2\",\n      \"field\": 114,\n      \"ascending\": true,\n      \"fields\": [\n        \"name\",\n        \"code\",\n        \"lastPrice\",\n        \"preClosePrice\",\n        \"changeRate\",\n        \"amount\",\n        \"volumeRatio\",\n        \"fiveMinRise\",\n        \"amplitudeRate\",\n        \"orderRatio\",\n        \"threeMinRise\"\n      ]\n    },\n    {\n      \"identifier\": \"振幅排名\",\n      \"code\": \"9E341731AEDFB798E050A8C05B01C2B2\",\n      \"field\": 37,\n      \"ascending\": false,\n      \"fields\": [\n        \"name\",\n        \"code\",\n        \"lastPrice\",\n        \"preClosePrice\",\n        \"changeRate\",\n        \"amount\",\n        \"volumeRatio\",\n        \"fiveMinRise\",\n        \"amplitudeRate\",\n        \"orderRatio\",\n        \"threeMinRise\"\n      ]\n    },\n    {\n      \"identifier\": \"沪深委比前10名\",\n      \"code\": \"9E341731AEDFB798E050A8C05B01C2B2\",\n      \"field\": 53,\n      \"ascending\": false,\n      \"fields\": [\n        \"name\",\n        \"code\",\n        \"lastPrice\",\n        \"preClosePrice\",\n        \"changeRate\",\n        \"amount\",\n        \"volumeRatio\",\n        \"fiveMinRise\",\n        \"amplitudeRate\",\n        \"orderRatio\",\n        \"threeMinRise\"\n      ]\n    },\n    {\n      \"identifier\": \"沪深委比后10名\",\n      \"code\": \"9E341731AEDFB798E050A8C05B01C2B2\",\n      \"field\": 53,\n      \"ascending\": true,\n      \"fields\": [\n        \"name\",\n        \"code\",\n        \"lastPrice\",\n        \"preClosePrice\",\n        \"changeRate\",\n        \"amount\",\n        \"volumeRatio\",\n        \"fiveMinRise\",\n        \"amplitudeRate\",\n        \"orderRatio\",\n        \"threeMinRise\"\n      ]\n    },\n    {\n      \"identifier\": \"沪深总金额排名\",\n      \"code\": \"9E341731AEDFB798E050A8C05B01C2B2\",\n      \"field\": 20,\n      \"ascending\": false,\n      \"fields\": [\n        \"name\",\n        \"code\",\n        \"lastPrice\",\n        \"preClosePrice\",\n        \"changeRate\",\n        \"amount\",\n        \"volumeRatio\",\n        \"fiveMinRise\",\n        \"amplitudeRate\",\n        \"orderRatio\",\n        \"threeMinRise\"\n      ]\n    }\n  ]\n}",
+      "bodyContentType": "application/json"
+    },
+    {
+      "id": "case:dayk",
+      "name": "dayk",
+      "folder": "项目用例",
+      "method": "POST",
+      "url": "https://terminal.sfccn.com/terminal/desk/quotes/api/dayk",
+      "headers": [
+        {
+          "key": "accept",
+          "value": "application/json",
+          "enabled": true
+        },
+        {
+          "key": "accept-language",
+          "value": "zh-CN",
+          "enabled": true
+        },
+        {
+          "key": "referer",
+          "value": "https://terminal.sfccn.com/terminal/desk/quotes/",
+          "enabled": true
+        },
+        {
+          "key": "sec-fetch-dest",
+          "value": "empty",
+          "enabled": true
+        },
+        {
+          "key": "sec-fetch-mode",
+          "value": "cors",
+          "enabled": true
+        },
+        {
+          "key": "sec-fetch-site",
+          "value": "same-origin",
+          "enabled": true
+        },
+        {
+          "key": "user-agent",
+          "value": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) sfc-connect/1.0.82 Chrome/114.0.5735.289 Electron/25.8.3 Safari/537.36",
+          "enabled": true
+        },
+        {
+          "key": "sec-ch-ua",
+          "value": "\"Not.A/Brand\";v=\"8\", \"Chromium\";v=\"114\"",
+          "enabled": true
+        },
+        {
+          "key": "sec-ch-ua-mobile",
+          "value": "?0",
+          "enabled": true
+        },
+        {
+          "key": "sec-ch-ua-platform",
+          "value": "\"Windows\"",
+          "enabled": true
+        },
+        {
+          "key": "secret",
+          "value": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJhdXRoMCIsImV4cCI6MTc5NTA1ODc3OSwidXNlciI6IntcImlkYWFzSWRcIjpcInVzLTQ0YTY2NDViODI3NTRkZWNiNjg5MTVhOWM0ZGU1ZDgyXCIsXCJsb2dpbkNvZGVcIjpcIjEzMjQ2ODI5ODI2XCIsXCJtZWV0aW5nWW5cIjowLFwibW9iaWxlXCI6XCIxMzI0NjgyOTgyNlwiLFwibmlja05hbWVcIjpcIuS9mei0neWKoFwiLFwic3RhdHVzXCI6NSxcInVzZXJJZFwiOjEwMDUxLFwieGN4T3BlbklkXCI6XCJvTVhnSTQ4czQ1R3ZXc2U2U1lsRUlud25pZzJrXCIsXCJ6bGJ4WW5cIjowfSJ9.NveTc59N4p03BB_VjhXDGlLkbBcfmDDekifwsAKTl-4",
+          "enabled": true
+        },
+        {
+          "key": "terminalenv",
+          "value": "prd",
+          "enabled": true
+        },
+        {
+          "key": "token",
+          "value": "{{token}}",
+          "enabled": true
+        }
+      ],
+      "query": [],
+      "bodyMode": "raw",
+      "body": "{\n  \"code\": \"000010.SZ\",\n  \"requestType\": 1,\n  \"subtype\": \"\",\n  \"datetime\": \"19900101\",\n  \"mode\": 0\n}",
+      "bodyContentType": "application/json"
+    },
+    {
+      "id": "76ca79f4-339",
+      "name": "groupwithstockstree",
+      "method": "GET",
+      "url": "https://terminal.sfccn.com/terminal/quotes/user-stock/group/groupWithStocksTree",
+      "headers": [
+        {
+          "key": "accept",
+          "value": "application/json",
+          "enabled": true
+        },
+        {
+          "key": "accept-language",
+          "value": "zh-CN",
+          "enabled": true
+        },
+        {
+          "key": "referer",
+          "value": "https://terminal.sfccn.com/terminal/desk/quotes/",
+          "enabled": true
+        },
+        {
+          "key": "sec-fetch-dest",
+          "value": "empty",
+          "enabled": true
+        },
+        {
+          "key": "sec-fetch-mode",
+          "value": "cors",
+          "enabled": true
+        },
+        {
+          "key": "sec-fetch-site",
+          "value": "same-origin",
+          "enabled": true
+        },
+        {
+          "key": "user-agent",
+          "value": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) sfc-connect/1.0.82 Chrome/114.0.5735.289 Electron/25.8.3 Safari/537.36",
+          "enabled": true
+        },
+        {
+          "key": "sec-ch-ua",
+          "value": "\"Not.A/Brand\";v=\"8\", \"Chromium\";v=\"114\"",
+          "enabled": true
+        },
+        {
+          "key": "sec-ch-ua-mobile",
+          "value": "?0",
+          "enabled": true
+        },
+        {
+          "key": "sec-ch-ua-platform",
+          "value": "\"Windows\"",
+          "enabled": true
+        },
+        {
+          "key": "secret",
+          "value": "{{secret}}",
+          "enabled": true
+        },
+        {
+          "key": "terminalenv",
+          "value": "{{terminalenv}}",
+          "enabled": true
+        },
+        {
+          "key": "token",
+          "value": "{{token}}",
+          "enabled": true
+        }
+      ],
+      "query": [],
+      "bodyMode": "none",
+      "body": "",
       "bodyContentType": "application/json"
     }
   ]

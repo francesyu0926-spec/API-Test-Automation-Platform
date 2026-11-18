@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import yaml from "js-yaml";
 
+import { readProjectCase } from "./caseStore";
 import { getCollection } from "./collectionStore";
 import { getRepoRoot, pythonExecutable } from "./repo";
 import { runPython } from "./pythonRun";
@@ -123,6 +124,7 @@ export async function listProjectAssets(projectId: string): Promise<{
   environments: string[];
   suites: string[];
   cases: string[];
+  caseTexts: Record<string, string>;
 }> {
   const base = path.join(getRepoRoot(), "projects", projectId);
   const readDir = async (sub: string) => {
@@ -135,10 +137,17 @@ export async function listProjectAssets(projectId: string): Promise<{
       return [];
     }
   };
+  const cases = await readDir("cases");
+  const caseTexts: Record<string, string> = {};
+  for (const name of cases) {
+    const text = await readProjectCase(projectId, name);
+    if (text != null) caseTexts[name] = text;
+  }
   return {
     environments: await readDir("environments"),
     suites: await readDir("suites"),
-    cases: await readDir("cases"),
+    cases,
+    caseTexts,
   };
 }
 
@@ -395,7 +404,7 @@ export async function getProjectVariables(
       const text = await fs.readFile(filePath, "utf8");
       const doc = yaml.load(text) as { variables?: Record<string, unknown> };
       for (const [k, v] of Object.entries(doc.variables ?? {})) {
-        variables[String(k)] = String(v);
+        variables[String(k)] = String(v).trim();
       }
     } catch {
       // missing env file

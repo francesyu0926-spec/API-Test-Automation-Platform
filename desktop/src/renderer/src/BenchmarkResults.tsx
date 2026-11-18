@@ -9,6 +9,7 @@ import AggregateReportTable, {
 import BenchmarkSampleTable from "./benchmarkSampleTable";
 import { LatencyDistributionChart, StatusCodeChart } from "./benchmarkCharts";
 import { capturePerfChartImages } from "./benchmarkChartExport";
+import { formatPerfStartedAtLocal } from "./perfDateTime";
 import { buildPerfReportPdfHtml } from "./perfReportPdfHtml";
 
 type Props = {
@@ -132,7 +133,7 @@ export default function BenchmarkResults({ report, running, project, onToast, on
   const s = report.stats;
   const requestCaption = report.request.name?.trim() || `${report.request.method} ${report.request.url}`;
   const allOk = s.failed === 0;
-  const finishedAt = report.startedAt.replace("T", " ").slice(0, 19);
+  const finishedAt = formatPerfStartedAtLocal(report.startedAt);
 
   return (
     <div ref={reportRootRef} className="workbench-perf loadtest-report">

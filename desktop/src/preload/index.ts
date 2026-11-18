@@ -46,6 +46,7 @@ export type AtpApi = {
     environments: string[];
     suites: string[];
     cases: string[];
+    caseTexts: Record<string, string>;
   }>;
   getSuiteCases: (
     projectId: string,
@@ -105,6 +106,7 @@ export type AtpApi = {
     stderr: string;
   }>;
   captureConfig: () => Promise<{ ingest_host: string; ingest_port: number }>;
+  getProjectCaptureProfile: (projectId: string) => Promise<ProjectCaptureProfile>;
   listCaptureSessions: (project: string) => Promise<CaptureSessionRow[]>;
   captureStart: (project: string, label: string) => Promise<{ ok: boolean; sessionId?: string; error?: string }>;
   captureServeStart: (
@@ -215,6 +217,21 @@ export type AtpApi = {
     cancelled?: boolean;
     error?: string;
   }>;
+  listProjectPerfJsonFiles: (projectId: string) => Promise<string[]>;
+  findJmeterResultJtlFiles: (projectId: string) => Promise<string[]>;
+  findJmxFilesNearJtl: (jtlPath: string) => Promise<string[]>;
+  listProjectJmxFiles: (projectId: string) => Promise<string[]>;
+  aggregateJtlFile: (
+    jtlPath: string,
+    mode?: import("../shared/jtlStreamModes").JtlStreamModeId,
+  ) => Promise<import("../shared/jtlStreamAggregator").JtlStreamAggregateResult>;
+  archiveJtlToPerfFromFile: (
+    projectId: string,
+    jtlPath: string,
+    jmxPath?: string,
+    mode?: import("../shared/jtlStreamModes").JtlStreamModeId,
+  ) => Promise<{ ok: boolean; error?: string; relativePath?: string }>;
+  listProjectsPerfCounts: () => Promise<Array<{ id: string; name: string; count: number }>>;
   listPerfReports: (
     projectId: string,
     limit?: number,
@@ -230,6 +247,7 @@ export type AtpApi = {
       success: number;
       failed: number;
       rps: number;
+      jtlEndpoints?: import("../shared/apiWorkbenchTypes").HttpBenchmarkJtlEndpoint[];
     }>
   >;
   loadPerfReports: (projectId: string, files: string[]) => Promise<HttpBenchmarkReport[]>;
@@ -238,7 +256,22 @@ export type AtpApi = {
     visualHtml: string,
     suggestedFileName: string,
   ) => Promise<{ ok: boolean; pdfFilePath?: string; cancelled?: boolean; error?: string }>;
-  getPerfReportsDir: (projectId: string) => Promise<{ absolute: string; relative: string }>;
+  previewReportPdf: (
+    visualHtml: string,
+    suggestedFileName: string,
+  ) => Promise<{ ok: boolean; pdfPath?: string; error?: string }>;
+  openPerfReportPdf: (
+    projectId: string,
+    jsonFile: string,
+    visualHtml: string,
+    forceRegenerate?: boolean,
+  ) => Promise<{ ok: boolean; pdfPath?: string; created?: boolean; regenerated?: boolean; error?: string }>;
+  getPerfReportsDir: (projectId: string) => Promise<{
+    absolute: string;
+    relative: string;
+    jsonFileCount: number;
+    repoRoot: string;
+  }>;
   deletePerfReports: (
     projectId: string,
     files: string[],
@@ -256,10 +289,11 @@ export type AtpApi = {
     yamlContent: string,
   ) => Promise<{ ok: boolean; error?: string; relativePath?: string }>;
   deleteProjectCase: (projectId: string, caseName: string) => Promise<{ ok: boolean; error?: string }>;
+  readProjectCase: (projectId: string, caseName: string) => Promise<string | null>;
   writeRepoFile: (
     relativePath: string,
     content: string,
-  ) => Promise<{ ok: boolean; error?: string; relativePath?: string }>;
+  ) => Promise<{ ok: boolean; error?: string; relativePath?: string; absolutePath?: string }>;
   saveBytesWithDialog: (opts: {
     defaultPath?: string;
     base64: string;
@@ -271,6 +305,7 @@ export type AtpApi = {
     filters?: Array<{ name: string; extensions: string[] }>;
   }) => Promise<{ ok: boolean; error?: string; cancelled?: boolean; filePath?: string }>;
   readAbsoluteFile: (filePath: string) => Promise<string | null>;
+  statAbsoluteFile: (filePath: string) => Promise<number | null>;
   pickOpenFile: (opts: {
     defaultPath?: string;
     filters?: Array<{ name: string; extensions: string[] }>;
@@ -290,6 +325,7 @@ export type AtpApi = {
     outputDir?: string;
     jmeterHome?: string;
     generateReport?: boolean;
+    jvmArgs?: string;
   }) => Promise<{
     ok: boolean;
     cancelled?: boolean;
@@ -332,6 +368,7 @@ const api: AtpApi = {
   clearAllRuns: () => ipcRenderer.invoke("atp:clearAllRuns"),
   runSuite: (opts) => ipcRenderer.invoke("atp:runSuite", opts),
   captureConfig: () => ipcRenderer.invoke("atp:captureConfig"),
+  getProjectCaptureProfile: (projectId) => ipcRenderer.invoke("atp:getProjectCaptureProfile", projectId),
   listCaptureSessions: (project) => ipcRenderer.invoke("atp:listCaptureSessions", project),
   captureStart: (project, label) => ipcRenderer.invoke("atp:captureStart", project, label),
   captureServeStart: (project, sessionId, port) =>
@@ -386,9 +423,21 @@ const api: AtpApi = {
   savePerfReport: (projectId, report, visualHtml) =>
     ipcRenderer.invoke("atp:savePerfReport", projectId, report, visualHtml),
   listPerfReports: (projectId, limit) => ipcRenderer.invoke("atp:listPerfReports", projectId, limit),
+  listProjectPerfJsonFiles: (projectId) => ipcRenderer.invoke("atp:listProjectPerfJsonFiles", projectId),
+  findJmeterResultJtlFiles: (projectId) => ipcRenderer.invoke("atp:findJmeterResultJtlFiles", projectId),
+  findJmxFilesNearJtl: (jtlPath) => ipcRenderer.invoke("atp:findJmxFilesNearJtl", jtlPath),
+  listProjectJmxFiles: (projectId) => ipcRenderer.invoke("atp:listProjectJmxFiles", projectId),
+  aggregateJtlFile: (jtlPath, mode) => ipcRenderer.invoke("atp:aggregateJtlFile", jtlPath, mode),
+  archiveJtlToPerfFromFile: (projectId, jtlPath, jmxPath, mode) =>
+    ipcRenderer.invoke("atp:archiveJtlToPerfFromFile", projectId, jtlPath, jmxPath, mode),
+  listProjectsPerfCounts: () => ipcRenderer.invoke("atp:listProjectsPerfCounts"),
   loadPerfReports: (projectId, files) => ipcRenderer.invoke("atp:loadPerfReports", projectId, files),
   exportPerfReportPdfDialog: (projectId, visualHtml, suggestedFileName) =>
     ipcRenderer.invoke("atp:exportPerfReportPdfDialog", projectId, visualHtml, suggestedFileName),
+  previewReportPdf: (visualHtml, suggestedFileName) =>
+    ipcRenderer.invoke("atp:previewReportPdf", visualHtml, suggestedFileName),
+  openPerfReportPdf: (projectId, jsonFile, visualHtml, forceRegenerate) =>
+    ipcRenderer.invoke("atp:openPerfReportPdf", projectId, jsonFile, visualHtml, forceRegenerate),
   getPerfReportsDir: (projectId) => ipcRenderer.invoke("atp:getPerfReportsDir", projectId),
   deletePerfReports: (projectId, files) => ipcRenderer.invoke("atp:deletePerfReports", projectId, files),
   saveProjectCase: (projectId, caseName, yamlContent, options) =>
@@ -397,10 +446,12 @@ const api: AtpApi = {
   updateProjectCase: (projectId, caseName, yamlContent) =>
     ipcRenderer.invoke("atp:updateProjectCase", projectId, caseName, yamlContent),
   deleteProjectCase: (projectId, caseName) => ipcRenderer.invoke("atp:deleteProjectCase", projectId, caseName),
+  readProjectCase: (projectId, caseName) => ipcRenderer.invoke("atp:readProjectCase", projectId, caseName),
   writeRepoFile: (relativePath, content) => ipcRenderer.invoke("atp:writeRepoFile", relativePath, content),
   saveBytesWithDialog: (opts) => ipcRenderer.invoke("atp:saveBytesWithDialog", opts),
   saveTextWithDialog: (opts) => ipcRenderer.invoke("atp:saveTextWithDialog", opts),
   readAbsoluteFile: (filePath) => ipcRenderer.invoke("atp:readAbsoluteFile", filePath),
+  statAbsoluteFile: (filePath) => ipcRenderer.invoke("atp:statAbsoluteFile", filePath),
   pickOpenFile: (opts) => ipcRenderer.invoke("atp:pickOpenFile", opts),
   pickOpenDirectory: (opts) => ipcRenderer.invoke("atp:pickOpenDirectory", opts),
   detectJmeter: (jmeterHome) => ipcRenderer.invoke("atp:detectJmeter", jmeterHome),

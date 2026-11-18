@@ -13,6 +13,25 @@ function sanitizeCaseName(name: string): string {
   return s.slice(0, 64) || "captured-case";
 }
 
+/** 读取 projects/<id>/cases/<name>.yaml（先精确文件名，再 sanitize 兜底） */
+export async function readProjectCase(projectId: string, caseName: string): Promise<string | null> {
+  const trimmed = caseName.trim();
+  if (!trimmed) return null;
+  const casesDir = path.join(getRepoRoot(), "projects", projectId, "cases");
+  const candidates = [
+    path.join(casesDir, `${trimmed}.yaml`),
+    path.join(casesDir, `${sanitizeCaseName(trimmed)}.yaml`),
+  ];
+  for (const caseFile of candidates) {
+    try {
+      return await fs.readFile(caseFile, "utf8");
+    } catch {
+      /* try next */
+    }
+  }
+  return null;
+}
+
 export async function projectCaseExists(projectId: string, caseName: string): Promise<boolean> {
   const id = sanitizeCaseName(caseName);
   const caseFile = path.join(getRepoRoot(), "projects", projectId, "cases", `${id}.yaml`);

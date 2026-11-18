@@ -1,14 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-import type { ApiCollectionFile, HttpBenchmarkReport, WorkbenchDraft } from "../../shared/apiWorkbenchTypes";
-import BenchmarkResults from "./BenchmarkResults";
+import type { ApiCollectionFile, WorkbenchDraft } from "../../shared/apiWorkbenchTypes";
 import LoadTestHistoryPanel from "./LoadTestHistoryPanel";
 import { archiveJmeterJtlToPerf } from "./jmeterPerfArchive";
 import JmeterJtlPanel from "./JmeterJtlPanel";
 import JmeterRunPanel from "./JmeterRunPanel";
 import { HTTP_METHODS, normalizeRawBodyDraft, savedRequestToDraft } from "./apiWorkbenchModel";
-import EnvContextBar from "./EnvContextBar";
-import EnvVariablesDialog, { collectTemplateVarNames } from "./EnvVariablesDialog";
+import { useProjectEnv } from "./ProjectEnvContext";
 import LoadingOverlay from "./LoadingOverlay";
 import { resolveWorkbenchPayload } from "./resolveWorkbenchRequest";
 import {
@@ -19,14 +17,20 @@ import {
 } from "./samplerAuth";
 import {
   defaultLoadTestPlan,
-  threadGroupToBenchmarkOpts,
+  loadPersistedLoadMainTab,
+  persistLoadMainTab,
   type LoadTestConfigNode,
   type LoadTestMainTab,
   type LoadTestPlan,
   type LoadTestThreadGroup,
 } from "./loadTestModel";
-import { TAB_DESCRIPTIONS } from "./navConfig";
+import { writeLoadTestPlanJmx } from "./loadTestJmx";
+import JtlStreamModeField from "./JtlStreamModeField";
+import AppCustomSelect from "./AppCustomSelect";
+import { loadPersistedJtlStreamMode, persistJtlStreamMode } from "./jtlStreamModePrefs";
+import type { JtlStreamModeId } from "../../shared/jtlStreamModes";
 import type { NotifyKind } from "./useAppNotify";
+import AppModuleChrome from "./AppModuleChrome";
 
 const CONFIG_LABELS: Record<LoadTestConfigNode, string> = {
   plan: "测试计划",
@@ -36,13 +40,12 @@ const CONFIG_LABELS: Record<LoadTestConfigNode, string> = {
 
 const MAIN_TAB_LABELS: Record<LoadTestMainTab, string> = {
   config: "压测配置",
-  report: "聚合报告",
   history: "压测历史",
   jmeterRun: "执行 JMX",
   jmeterJtl: "JTL 报告",
 };
 
-const LOAD_MAIN_TABS: LoadTestMainTab[] = ["config", "report", "history", "jmeterRun", "jmeterJtl"];
+const LOAD_MAIN_TABS: LoadTestMainTab[] = ["config", "jmeterRun", "jmeterJtl", "history"];
 
 const THREAD_PRESETS: Array<{
   id: string;
@@ -51,16 +54,16 @@ const THREAD_PRESETS: Array<{
   rampUpSec: number;
   loops: number;
 }> = [
-  { id: "smoke", label: "冒烟 1×1", threads: 1, rampUpSec: 0, loops: 1 },
-  { id: "light", label: "轻量 5×2", threads: 5, rampUpSec: 2, loops: 2 },
-  { id: "default", label: "默认 10×1", threads: 10, rampUpSec: 5, loops: 1 },
-  { id: "stress", label: "压测 30×3", threads: 30, rampUpSec: 10, loops: 3 },
+  { id: "smoke", label: "冒烟", threads: 1, rampUpSec: 0, loops: 1 },
+  { id: "light", label: "轻量", threads: 5, rampUpSec: 2, loops: 2 },
+  { id: "default", label: "默认", threads: 10, rampUpSec: 5, loops: 1 },
+  { id: "stress", label: "压测", threads: 30, rampUpSec: 10, loops: 3 },
 ];
 
 type ThreadFieldDef = {
   key: keyof LoadTestThreadGroup;
   label: string;
-  sub: string;
+  suffix: string;
   hint: string;
   min?: number;
   max?: number;
@@ -74,7 +77,7 @@ const THREAD_FIELDS: ThreadFieldDef[] = [
   {
     key: "threads",
     label: "线程数",
-    sub: "Threads",
+    suffix: "线程",
     hint: "并发虚拟用户，上限 50",
     min: 1,
     max: 50,
@@ -82,14 +85,14 @@ const THREAD_FIELDS: ThreadFieldDef[] = [
   {
     key: "rampUpSec",
     label: "Ramp-Up",
-    sub: "秒",
+    suffix: "秒",
     hint: "在指定秒内逐步拉起全部线程",
     min: 0,
   },
   {
     key: "loops",
     label: "循环次数",
-    sub: "Loops",
+    suffix: "次",
     hint: "每线程重复执行采样器的次数",
     min: 1,
     max: 500,
@@ -97,14 +100,14 @@ const THREAD_FIELDS: ThreadFieldDef[] = [
   {
     key: "warmup",
     label: "预热样本",
-    sub: "Warmup",
+    suffix: "次",
     hint: "不计入聚合统计，用于连接预热",
     min: 0,
   },
   {
     key: "timeoutMs",
     label: "请求超时",
-    sub: "ms",
+    suffix: "ms",
     hint: "单次 HTTP 等待上限",
     min: 1000,
     step: 1000,
@@ -116,14 +119,10 @@ type Props = {
   projectName: string;
   onNotify?: (text: string, kind?: NotifyKind) => void;
   externalDraft: WorkbenchDraft | null;
-  externalEnvName?: string;
-  externalVariables?: Record<string, string> | null;
   onConsumeExternalDraft: () => void;
-  onEditInWorkbench?: (payload: {
-    draft: WorkbenchDraft;
-    envName: string;
-    variables: Record<string, string>;
-  }) => void;
+  onEditInWorkbench?: (payload: { draft: WorkbenchDraft }) => void;
+  /** 偏好设置保存后递增，用于同步 JTL 解析模式 */
+  jtlStreamPrefsRevision?: number;
 };
 
 export default function LoadTestPanel({
@@ -131,42 +130,66 @@ export default function LoadTestPanel({
   projectName,
   onNotify,
   externalDraft,
-  externalEnvName,
-  externalVariables,
   onConsumeExternalDraft,
+  jtlStreamPrefsRevision = 0,
 }: Props) {
+  const {
+    envName,
+    variables,
+    refreshVariables,
+    openEnvVariables,
+  } = useProjectEnv();
   const [plan, setPlan] = useState<LoadTestPlan>(defaultLoadTestPlan);
-  const [mainTab, setMainTab] = useState<LoadTestMainTab>("config");
+  const [mainTab, setMainTab] = useState<LoadTestMainTab>(() => loadPersistedLoadMainTab() ?? "config");
+  const [jtlStreamMode, setJtlStreamMode] = useState<JtlStreamModeId>(() => loadPersistedJtlStreamMode());
+
+  useEffect(() => {
+    setJtlStreamMode(loadPersistedJtlStreamMode());
+  }, [jtlStreamPrefsRevision]);
+
+  const goMainTab = useCallback((tab: LoadTestMainTab) => {
+    setMainTab(tab);
+    persistLoadMainTab(tab);
+  }, []);
   const [configNode, setConfigNode] = useState<LoadTestConfigNode>("threadGroup");
 
   const crumbLabel =
     mainTab === "config" ? CONFIG_LABELS[configNode] : MAIN_TAB_LABELS[mainTab];
 
   const goConfig = (node: LoadTestConfigNode) => {
-    setMainTab("config");
+    goMainTab("config");
     setConfigNode(node);
   };
   const [pendingJtlPath, setPendingJtlPath] = useState("");
-  const [envName, setEnvName] = useState("dev");
-  const [environments, setEnvironments] = useState<string[]>(["dev"]);
-  const [variables, setVariables] = useState<Record<string, string>>({});
-  const [running, setRunning] = useState(false);
-  const [report, setReport] = useState<HttpBenchmarkReport | null>(null);
+  const [launchingJmeter, setLaunchingJmeter] = useState(false);
+  const [jmeterPreset, setJmeterPreset] = useState<{
+    jmxPath: string;
+    outputDir: string;
+    autoRunKey: number;
+    fromConfig: boolean;
+  } | null>(null);
   const [collections, setCollections] = useState<Awaited<ReturnType<typeof window.atp.listCollections>>>([]);
   const [collectionId, setCollectionId] = useState("default");
   const [collection, setCollection] = useState<ApiCollectionFile | null>(null);
   const [collectionsLoading, setCollectionsLoading] = useState(false);
-  const [envDialogOpen, setEnvDialogOpen] = useState(false);
   const [importFromCollectionOpen, setImportFromCollectionOpen] = useState(false);
   const [perfHistoryCount, setPerfHistoryCount] = useState(0);
 
-  useEffect(() => {
+  const refreshPerfHistoryCount = useCallback(() => {
     if (!project) {
       setPerfHistoryCount(0);
       return;
     }
-    void window.atp.listPerfReports(project, 80).then((list) => setPerfHistoryCount(list.length));
-  }, [project, report?.id]);
+    void window.atp.listPerfReports(project, 200).then((list) => setPerfHistoryCount(list.length));
+  }, [project]);
+
+  useEffect(() => {
+    refreshPerfHistoryCount();
+  }, [refreshPerfHistoryCount, jmeterPreset?.autoRunKey]);
+
+  useEffect(() => {
+    if (mainTab === "history") refreshPerfHistoryCount();
+  }, [mainTab, refreshPerfHistoryCount]);
 
   const showToast = (text: string, kind: NotifyKind = "info") => {
     if (onNotify) onNotify(text, kind);
@@ -228,32 +251,15 @@ export default function LoadTestPanel({
   }, [project]);
 
   useEffect(() => {
-    if (!project) return;
-    void window.atp.listProjectAssets(project).then((a) => {
-      const envs = a.environments.length ? a.environments : ["dev"];
-      setEnvironments(envs);
-      setEnvName((prev) => (envs.includes(prev) ? prev : envs[0]));
-    });
-  }, [project]);
-
-  useEffect(() => {
-    if (!project || !envName) return;
-    void window.atp.getProjectVariables(project, envName).then(setVariables);
-  }, [project, envName]);
-
-  useEffect(() => {
     if (!externalDraft) return;
     const normalized = normalizeRawBodyDraft(externalDraft);
     void (async () => {
-      const targetEnv = externalEnvName || envName;
-      if (externalEnvName) setEnvName(externalEnvName);
-      const base =
-        project && targetEnv ? await window.atp.getProjectVariables(project, targetEnv) : (externalVariables ?? {});
-      const withAuth = mergeAuthFromSampler({ ...base, ...(externalVariables ?? {}) }, normalized);
-      setVariables(withAuth);
+      const base = project && envName ? await window.atp.getProjectVariables(project, envName) : {};
+      const withAuth = mergeAuthFromSampler({ ...base, ...variables }, normalized);
       const authPatch = authPatchFromSampler(normalized);
-      if (project && targetEnv && Object.keys(authPatch).length) {
-        await persistEnvVariables(project, targetEnv, authPatch);
+      if (project && envName && Object.keys(authPatch).length) {
+        await persistEnvVariables(project, envName, authPatch);
+        await refreshVariables();
       }
       setPlan((p) => ({
         ...p,
@@ -270,12 +276,17 @@ export default function LoadTestPanel({
           : "已从 API 工作台载入 HTTP 请求",
       );
     })();
-  }, [externalDraft, externalEnvName, externalVariables, onConsumeExternalDraft, project, envName]);
+  }, [externalDraft, onConsumeExternalDraft, project, envName, variables, refreshVariables]);
 
   const missingEnvVars = useMemo(
     () => unresolvedWorkbenchVars(plan.sampler, variables),
     [plan.sampler, variables],
   );
+
+  const linkedRequest = useMemo(() => {
+    if (!plan.sourceRequestId || !collection) return null;
+    return collection.requests.find((r) => r.id === plan.sourceRequestId) ?? null;
+  }, [plan.sourceRequestId, collection]);
 
   const onRun = useCallback(async () => {
     if (!project) {
@@ -289,49 +300,53 @@ export default function LoadTestPanel({
     }
     if (missingEnvVars.length) {
       showToast(`未配置变量：${missingEnvVars.join("、")}，请点「变量」填写`);
-      setEnvDialogOpen(true);
+      openEnvVariables({ sampler: plan.sampler });
       goConfig("httpSampler");
       return;
     }
-    let payload;
     try {
-      payload = resolveWorkbenchPayload(plan.sampler, variables);
+      resolveWorkbenchPayload(plan.sampler, variables);
     } catch (err) {
       const msg = err instanceof Error ? err.message : "请检查环境变量";
       showToast(msg);
-      if (msg.includes("未定义变量")) setEnvDialogOpen(true);
+      if (msg.includes("未定义变量")) openEnvVariables({ sampler: plan.sampler });
       return;
     }
-    const opts = threadGroupToBenchmarkOpts(plan.threadGroup);
-    setRunning(true);
-    setReport(null);
-    setMainTab("report");
-    try {
-      const result = await window.atp.runHttpBenchmark(
-        { ...payload, timeoutMs: plan.threadGroup.timeoutMs },
-        opts,
-        { name: plan.sampler.name },
-      );
-      setReport(result);
-      if (project) {
-        void window.atp.savePerfReport(project, result).then(() => {
-          void window.atp.listPerfReports(project, 80).then((list) => setPerfHistoryCount(list.length));
-        });
-      }
-      if (result.cancelled) showToast("已停止测试");
-      else {
-        const rate = Math.round((result.stats.success / Math.max(1, result.stats.samples)) * 100);
-        showToast(`测试结束：成功率 ${rate}%`, rate >= 95 ? "success" : rate >= 80 ? "warn" : "error");
-      }
-    } finally {
-      setRunning(false);
-    }
-  }, [plan, variables, project, missingEnvVars]);
 
-  const onStop = () => {
-    void window.atp.cancelHttpBenchmark();
-    showToast("正在停止…");
-  };
+    setLaunchingJmeter(true);
+    try {
+      const written = await writeLoadTestPlanJmx(
+        project,
+        plan,
+        envName,
+        variables,
+        linkedRequest?.name,
+      );
+      if (!written.ok || !written.absolutePath) {
+        showToast(written.error ?? "生成 JMX 失败", "error");
+        return;
+      }
+      if (written.warnings.length) showToast(written.warnings[0]!);
+      const autoRunKey = Date.now();
+      setJmeterPreset({
+        jmxPath: written.absolutePath,
+        outputDir: written.outputDir ?? "",
+        autoRunKey,
+        fromConfig: true,
+      });
+      goMainTab("jmeterRun");
+      showToast(
+        written.relativePath
+          ? `已生成 JMX：${written.relativePath}，正在跳转执行…`
+          : "已生成 JMX，正在跳转执行…",
+        "success",
+      );
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : "生成或执行准备失败", "error");
+    } finally {
+      setLaunchingJmeter(false);
+    }
+  }, [plan, variables, project, missingEnvVars, envName, linkedRequest?.name]);
 
   const totalSamples = plan.threadGroup.threads * plan.threadGroup.loops;
 
@@ -360,10 +375,6 @@ export default function LoadTestPanel({
   };
 
   const projectRequests = collection?.requests ?? [];
-  const linkedRequest = useMemo(() => {
-    if (!plan.sourceRequestId || !collection) return null;
-    return collection.requests.find((r) => r.id === plan.sourceRequestId) ?? null;
-  }, [plan.sourceRequestId, collection]);
 
   const samplerHasTarget = Boolean(plan.sampler.url.trim());
   const canPickFromCollection = Boolean(project && collections.length);
@@ -405,33 +416,42 @@ export default function LoadTestPanel({
       ? (plan.threadGroup.rampUpSec / plan.threadGroup.threads).toFixed(1)
       : null;
 
-  const renderThreadField = (field: ThreadFieldDef, compact?: boolean) => {
+  const renderThreadField = (field: ThreadFieldDef) => {
     const value = plan.threadGroup[field.key];
     const fallback =
       field.key === "timeoutMs" ? 30_000 : field.key === "rampUpSec" || field.key === "warmup" ? 0 : 1;
     return (
-      <label
-        key={field.key}
-        className={`loadtest-param-cell${compact ? " loadtest-param-cell--compact" : ""}`}
-        title={field.hint}
-      >
-        <span className="loadtest-param-cell-label">
-          <span>{field.label}</span>
-          <span className="loadtest-param-cell-sub">{field.sub}</span>
-        </span>
-        <input
-          type="number"
-          className="text-input loadtest-param-cell-input"
-          min={field.min}
-          max={field.max}
-          step={field.step}
-          disabled={running}
-          value={value}
-          onChange={(e) => updateThreadGroup(field.key, Number(e.target.value), fallback)}
-        />
+      <label key={field.key} className="loadtest-param-cell" title={field.hint}>
+        <span className="loadtest-param-cell-label">{field.label}</span>
+        <div className="loadtest-param-input-wrap">
+          <input
+            type="number"
+            className="text-input loadtest-param-cell-input"
+            min={field.min}
+            max={field.max}
+            step={field.step}
+            disabled={launchingJmeter}
+            value={value}
+            onChange={(e) => updateThreadGroup(field.key, Number(e.target.value), fallback)}
+          />
+          <span className="loadtest-param-suffix" aria-hidden>
+            {field.suffix}
+          </span>
+        </div>
       </label>
     );
   };
+
+  const flowStepIndex =
+    mainTab === "config"
+      ? 0
+      : mainTab === "jmeterRun"
+        ? 1
+        : mainTab === "jmeterJtl"
+          ? 2
+          : mainTab === "history"
+            ? 3
+            : -1;
 
   const fieldByKey = Object.fromEntries(THREAD_FIELDS.map((f) => [f.key, f])) as Record<
     keyof LoadTestThreadGroup,
@@ -439,42 +459,41 @@ export default function LoadTestPanel({
   >;
 
   const hideBenchRunToolbar = mainTab === "jmeterRun" || mainTab === "jmeterJtl" || mainTab === "history";
-  const readinessKey = running ? "running" : canStart ? "ready" : "blocked";
-  const readinessText = running ? "压测运行中" : canStart ? "可启动" : "待配置";
   const configStepTotal = 3;
   const configStepDone = [Boolean(project), samplerHasTarget, missingEnvVars.length === 0].filter(Boolean).length;
 
+  const onHttpSamplerPage = mainTab === "config" && configNode === "httpSampler";
+  const suppressTopUrlWarn = onHttpSamplerPage && !samplerHasTarget && missingEnvVars.length === 0;
+
   const benchRunToolbar = (
-    <div className="loadtest-editor-actions">
-      <div className="loadtest-editor-actions-primary">
-        {!canStart && !running && !samplerHasTarget ? (
+    <div className="loadtest-editor-actions loadtest-editor-actions--split">
+      <div className="loadtest-editor-actions-left">
+        {!canStart && !launchingJmeter && !samplerHasTarget && !onHttpSamplerPage ? (
           <button type="button" className="nav-btn nav-btn--compact" onClick={() => goConfig("httpSampler")}>
             配置 HTTP
           </button>
         ) : null}
-        {!canStart && !running && samplerHasTarget && missingEnvVars.length ? (
-          <button type="button" className="nav-btn nav-btn--compact" onClick={() => setEnvDialogOpen(true)}>
+        {!canStart && !launchingJmeter && samplerHasTarget && missingEnvVars.length ? (
+          <button
+            type="button"
+            className="nav-btn nav-btn--compact nav-btn--ghost"
+            onClick={() => openEnvVariables({ sampler: plan.sampler })}
+          >
             填写变量
           </button>
         ) : null}
         <button
           type="button"
-          className="primary"
-          disabled={running || !canStart}
-          title={!canStart && !running ? startDisabledReason : undefined}
-          onClick={() => void onRun()}
+          className={`nav-btn nav-btn--compact nav-btn--ghost${mainTab === "history" ? " active" : ""}`}
+          disabled={!project}
+          title="查看以往压测存档，无需先执行本次压测"
+          onClick={() => goMainTab("history")}
         >
-          {running ? "运行中…" : "启动压测"}
+          压测历史{perfHistoryCount > 0 ? ` (${perfHistoryCount})` : ""}
         </button>
-        {running ? (
-          <button type="button" className="nav-btn" onClick={onStop}>
-            停止
-          </button>
-        ) : null}
       </div>
-      <div className="loadtest-editor-actions-chips">
-        <span className={`loadtest-readiness loadtest-readiness--${readinessKey}`}>{readinessText}</span>
-        {canStart || running ? (
+      <div className="loadtest-editor-actions-right">
+        {canStart || launchingJmeter ? (
           <span className="loadtest-toolbar-meta loadtest-toolbar-meta--inline">
             <span className="loadtest-meta-chip">
               预期样本 <strong>{totalSamples}</strong>
@@ -484,74 +503,91 @@ export default function LoadTestPanel({
               {plan.threadGroup.warmup > 0 ? ` · 预热 ${plan.threadGroup.warmup}` : ""}
             </span>
           </span>
-        ) : startDisabledReason ? (
+        ) : null}
+        {!suppressTopUrlWarn && !canStart && !launchingJmeter && startDisabledReason ? (
           <span className="loadtest-editor-actions-hint" role="status">
             {startDisabledReason}
           </span>
         ) : null}
+        <button
+          type="button"
+          className={`primary loadtest-run-primary${canStart && !launchingJmeter ? " loadtest-run-primary--ready" : ""}`}
+          disabled={launchingJmeter || !canStart}
+          title={!canStart && !launchingJmeter ? startDisabledReason : undefined}
+          onClick={() => void onRun()}
+        >
+          {launchingJmeter ? "准备中…" : "生成 JMX 并执行"}
+        </button>
       </div>
     </div>
   );
 
+  const flowStepper = (
+    <ol className="loadtest-flow-stepper" aria-label="压测流程">
+      {[
+        { id: 0, label: "配置" },
+        { id: 1, label: "JMX" },
+        { id: 2, label: "JTL" },
+      ].map((step, i, arr) => (
+        <li
+          key={step.id}
+          className={`loadtest-flow-step${
+            flowStepIndex === step.id ? " loadtest-flow-step--active" : ""
+          }${flowStepIndex > step.id ? " loadtest-flow-step--done" : ""}`}
+        >
+          <span className="loadtest-flow-step-dot" aria-hidden />
+          <span>{step.label}</span>
+          {i < arr.length - 1 ? <span className="loadtest-flow-step-line" aria-hidden /> : null}
+        </li>
+      ))}
+    </ol>
+  );
+
   return (
     <div className="loadtest">
-      <header className="loadtest-header workbench-topbar">
-        <div className="module-head-row loadtest-title-block">
-          <div>
-            <h2 className="page-head workbench-title loadtest-title">负载测试</h2>
-            <p className="hint loadtest-header-lede">{TAB_DESCRIPTIONS.load}</p>
-          </div>
-          <span className="module-context-chip" title={`项目 ID：${project}`}>
-            {projectName || project}
-          </span>
-        </div>
-        <section className="atp-fin-query-panel" aria-label="压测查询条件">
-          <h3 className="atp-fin-section-title">压测条件</h3>
-          <div className="loadtest-header-card">
-          <EnvContextBar
-            envName={envName}
-            environments={environments}
-            disabled={!project}
-            onEnvChange={setEnvName}
-            onOpenVars={() => setEnvDialogOpen(true)}
-            trailing={
-              <>
-                {missingEnvVars.length > 0 ? (
-                  <span className="loadtest-vars-warn" title={missingEnvVars.join(", ")}>
-                    缺变量：{missingEnvVars.join("、")}
+      <header className="loadtest-header loadtest-header--compact" aria-label="负载测试">
+        <AppModuleChrome tab="load" description={false} showShortcut={false} actions={flowStepper} />
+
+        <div className="loadtest-view-tabs-bar workbench-req-tabs-bar">
+          <nav
+            className="workbench-req-tabs workbench-req-tabs--segmented loadtest-view-tabs"
+            role="tablist"
+            aria-label="负载测试视图"
+          >
+            {LOAD_MAIN_TABS.map((tab) => (
+              <button
+                key={tab}
+                type="button"
+                role="tab"
+                aria-selected={mainTab === tab}
+                className={`workbench-tab${mainTab === tab ? " active" : ""}`}
+                onClick={() => goMainTab(tab)}
+              >
+                {MAIN_TAB_LABELS[tab]}
+                {tab === "history" && perfHistoryCount > 0 ? (
+                  <span className="loadtest-view-tab-badge" aria-hidden>
+                    {perfHistoryCount}
                   </span>
                 ) : null}
-                <span className="loadtest-header-hint">内置压测 · JMX · JTL</span>
-              </>
-            }
-          />
-          </div>
-        </section>
-
-        <nav className="atp-fin-tabs loadtest-main-nav" role="tablist" aria-label="负载测试视图">
-          {LOAD_MAIN_TABS.map((tab) => (
-            <button
-              key={tab}
-              type="button"
-              role="tab"
-              aria-selected={mainTab === tab}
-              className={`atp-fin-tab loadtest-main-nav-btn${mainTab === tab ? " active" : ""}`}
-              onClick={() => setMainTab(tab)}
-            >
-              {MAIN_TAB_LABELS[tab]}
-              {tab === "report" && (report || running) ? (
-                <span className="loadtest-main-nav-badge" aria-hidden>
-                  {running ? "…" : "●"}
-                </span>
-              ) : null}
-              {tab === "history" && perfHistoryCount > 0 ? (
-                <span className="loadtest-main-nav-badge" aria-hidden>
-                  {perfHistoryCount}
-                </span>
-              ) : null}
-            </button>
-          ))}
-        </nav>
+              </button>
+            ))}
+          </nav>
+          {mainTab === "jmeterJtl" || mainTab === "history" ? (
+            <div className="loadtest-tab-toolbar loadtest-head-jtl" title="当前视图的 JTL 解析模式">
+              <span className="loadtest-head-jtl-label hint">解析</span>
+              <JtlStreamModeField
+                compact
+                showFieldLabel={false}
+                value={jtlStreamMode}
+                onChange={(mode) => {
+                  setJtlStreamMode(mode);
+                  persistJtlStreamMode(mode);
+                }}
+                disabled={!project}
+              />
+            </div>
+          ) : null}
+        </div>
       </header>
 
       <div className={`loadtest-body${mainTab !== "config" ? " loadtest-body--no-tree" : ""}`}>
@@ -615,7 +651,7 @@ export default function LoadTestPanel({
         ) : null}
 
         <section
-          className={`loadtest-editor atp-fin-result-panel${mainTab === "report" ? " loadtest-editor--report" : ""}${
+          className={`loadtest-editor atp-fin-result-panel${
             mainTab === "history" ? " loadtest-editor--history" : ""
           }${mainTab === "jmeterRun" || mainTab === "jmeterJtl" ? " loadtest-editor--jmeter" : ""}`}
         >
@@ -628,17 +664,6 @@ export default function LoadTestPanel({
                 <span className="loadtest-editor-crumb-current">{crumbLabel}</span>
               </div>
             </div>
-
-            {mainTab === "report" ? (
-              <p className="hint loadtest-report-topbar-lede">
-                本次执行的聚合指标与分布图；历史记录、合并导出 PDF / JSON 请切换到「压测历史」。
-              </p>
-            ) : null}
-            {mainTab === "history" ? (
-              <p className="hint loadtest-report-topbar-lede">
-                浏览内置压测存档，支持单条或批量导出 PDF、导出 JSON、删除记录。
-              </p>
-            ) : null}
 
             {!hideBenchRunToolbar ? benchRunToolbar : null}
           </header>
@@ -656,7 +681,7 @@ export default function LoadTestPanel({
                 />
               </label>
               <p className="hint">
-                结构对标 Apache JMeter：测试计划下挂「线程组」与「HTTP 请求」采样器，执行后由「聚合报告」汇总指标。
+                结构对标 Apache JMeter：测试计划下挂「线程组」与「HTTP 请求」；配置完成后生成 JMX，在「执行 JMX」用本机 JMeter 运行。
               </p>
             </div>
           )}
@@ -681,7 +706,7 @@ export default function LoadTestPanel({
                             key={preset.id}
                             type="button"
                             className={`loadtest-preset-segment-btn${active ? " active" : ""}`}
-                            disabled={running}
+                            disabled={launchingJmeter}
                             onClick={() => applyThreadPreset(preset)}
                           >
                             {preset.label}
@@ -695,10 +720,12 @@ export default function LoadTestPanel({
                     {PRIMARY_THREAD_KEYS.map((key) => renderThreadField(fieldByKey[key]))}
                   </div>
 
-                  <div className="loadtest-param-strip loadtest-param-strip--sub" aria-label="高级参数">
-                    <span className="loadtest-param-strip-tag">高级</span>
-                    {ADVANCED_THREAD_KEYS.map((key) => renderThreadField(fieldByKey[key], true))}
-                  </div>
+                  <details className="loadtest-advanced-panel">
+                    <summary className="loadtest-advanced-summary">高级参数</summary>
+                    <div className="loadtest-param-strip loadtest-param-strip--sub" aria-label="高级参数">
+                      {ADVANCED_THREAD_KEYS.map((key) => renderThreadField(fieldByKey[key]))}
+                    </div>
+                  </details>
 
                   {rampPerThread ? (
                     <p className="loadtest-thread-footnote">
@@ -706,81 +733,100 @@ export default function LoadTestPanel({
                       {plan.threadGroup.threads}）
                     </p>
                   ) : null}
+
+                  {!samplerHasTarget ? (
+                    <div className="loadtest-thread-next">
+                      <button
+                        type="button"
+                        className="nav-btn nav-btn--compact nav-btn--ghost"
+                        onClick={() => goConfig("httpSampler")}
+                      >
+                        下一步：配置 HTTP 请求
+                      </button>
+                    </div>
+                  ) : null}
                 </div>
 
-                <aside className="loadtest-thread-aside" aria-label="压测概览与步骤">
+                <aside className="loadtest-thread-aside" aria-label="配置清单与概览">
+                  <h4 className="loadtest-aside-title">配置清单</h4>
+                  <ul className="loadtest-config-checklist">
+                    <li className={project ? "loadtest-check--ok" : "loadtest-check--warn"}>
+                      <span className="loadtest-check-mark" aria-hidden>
+                        {project ? "✓" : "!"}
+                      </span>
+                      <span>已选项目</span>
+                    </li>
+                    <li className={samplerHasTarget ? "loadtest-check--ok" : "loadtest-check--warn"}>
+                      <span className="loadtest-check-mark" aria-hidden>
+                        {samplerHasTarget ? "✓" : "!"}
+                      </span>
+                      <span>
+                        HTTP 请求 URL
+                        {!samplerHasTarget ? (
+                          <button
+                            type="button"
+                            className="loadtest-check-link"
+                            onClick={() => goConfig("httpSampler")}
+                          >
+                            去配置
+                          </button>
+                        ) : null}
+                      </span>
+                    </li>
+                    <li
+                      className={
+                        missingEnvVars.length === 0 && project
+                          ? "loadtest-check--ok"
+                          : "loadtest-check--warn"
+                      }
+                    >
+                      <span className="loadtest-check-mark" aria-hidden>
+                        {missingEnvVars.length === 0 && project ? "✓" : "!"}
+                      </span>
+                      <span>
+                        环境变量（{envName}）
+                        {missingEnvVars.length > 0 ? (
+                          <button
+                            type="button"
+                            className="loadtest-check-link"
+                            onClick={() => openEnvVariables({ sampler: plan.sampler })}
+                          >
+                            填写
+                          </button>
+                        ) : null}
+                      </span>
+                    </li>
+                  </ul>
+
                   <h4 className="loadtest-aside-title">压测概览</h4>
-                  <ul className="loadtest-aside-stats">
+                  <ul className="loadtest-aside-stats loadtest-aside-stats--compact">
                     <li>
                       <span className="loadtest-aside-stat-label">预期样本</span>
                       <span className="loadtest-aside-stat-value">{totalSamples}</span>
                     </li>
                     <li>
-                      <span className="loadtest-aside-stat-label">Ramp-Up</span>
-                      <span className="loadtest-aside-stat-value">{plan.threadGroup.rampUpSec}s</span>
-                    </li>
-                    <li>
-                      <span className="loadtest-aside-stat-label">单请求超时</span>
+                      <span className="loadtest-aside-stat-label">并发</span>
                       <span className="loadtest-aside-stat-value">
-                        {plan.threadGroup.timeoutMs >= 1000
-                          ? `${plan.threadGroup.timeoutMs / 1000}s`
-                          : `${plan.threadGroup.timeoutMs}ms`}
-                      </span>
-                    </li>
-                    <li>
-                      <span className="loadtest-aside-stat-label">HTTP 采样</span>
-                      <span
-                        className={`loadtest-aside-stat-value${samplerHasTarget ? " ok" : " warn"}`}
-                      >
-                        {samplerHasTarget ? "已配置" : "未配置"}
+                        {plan.threadGroup.threads} × {plan.threadGroup.loops}
                       </span>
                     </li>
                   </ul>
-
-                  <h4 className="loadtest-aside-title">下一步</h4>
-                  <ol className="loadtest-aside-steps">
-                    <li className={samplerHasTarget ? "done" : "current"}>
-                      在 HTTP 请求中设置 URL{samplerHasTarget ? "（已完成）" : ""}
-                    </li>
-                    <li className={missingEnvVars.length === 0 && samplerHasTarget ? "done" : canStart ? "current" : ""}>
-                      检查环境变量与环境 {envName}
-                    </li>
-                    <li>点击工具栏「启动压测」，在聚合报告查看结果</li>
-                  </ol>
-
-                  {!samplerHasTarget ? (
-                    <button
-                      type="button"
-                      className="primary loadtest-aside-cta"
-                      onClick={() => goConfig("httpSampler")}
-                    >
-                      去配置 HTTP 请求
-                    </button>
-                  ) : canStart ? (
-                    <button
-                      type="button"
-                      className="primary loadtest-aside-cta"
-                      disabled={running}
-                      onClick={() => void onRun()}
-                    >
-                      {running ? "运行中…" : "启动压测"}
-                    </button>
-                  ) : (
-                    <button
-                      type="button"
-                      className="nav-btn loadtest-aside-cta"
-                      onClick={() => setEnvDialogOpen(true)}
-                    >
-                      填写环境变量
-                    </button>
-                  )}
+                  <p className="hint loadtest-aside-hint">执行请用上方「生成 JMX 并执行」</p>
                 </aside>
               </div>
             </div>
           )}
 
           {mainTab === "config" && configNode === "httpSampler" && (
-            <div className="loadtest-panel loadtest-panel--sampler card">
+            <div className="loadtest-panel loadtest-panel--sampler">
+              <div className="loadtest-sampler-shell">
+                <header className="loadtest-sampler-shell-head">
+                  <div>
+                    <h3 className="loadtest-sampler-shell-title">HTTP 请求</h3>
+                    <p className="loadtest-sampler-shell-lede">配置采样 URL 与 Body，压测将按线程组参数重复调用</p>
+                  </div>
+                </header>
+
               {showImportStrip ? (
                 <div className="loadtest-sampler-source-bar">
                   {!project ? (
@@ -790,25 +836,25 @@ export default function LoadTestPanel({
                       <LoadingOverlay show={collectionsLoading} label="加载集合…" />
                       <div className="loadtest-pick-head">
                         <span className="loadtest-pick-label">从集合选择</span>
-                        <select
+                        <AppCustomSelect
                           className="workbench-sidebar-select loadtest-pick-module"
                           value={effectiveCollectionId}
                           disabled={!collections.length}
-                          onChange={(e) => {
-                            setCollectionId(e.target.value);
+                          ariaLabel="集合模块"
+                          placeholder="暂无模块"
+                          options={
+                            collections.length
+                              ? collections.map((c) => ({
+                                  value: c.id,
+                                  label: `${c.name} · ${c.requestCount}`,
+                                }))
+                              : [{ value: "", label: "暂无模块" }]
+                          }
+                          onChange={(id) => {
+                            setCollectionId(id);
                             setPlan((p) => ({ ...p, sourceRequestId: null }));
                           }}
-                        >
-                          {!collections.length ? (
-                            <option value="">暂无模块</option>
-                          ) : (
-                            collections.map((c) => (
-                              <option key={c.id} value={c.id}>
-                                {c.name} · {c.requestCount}
-                              </option>
-                            ))
-                          )}
-                        </select>
+                        />
                         <button
                           type="button"
                           className="nav-btn loadtest-import-close"
@@ -836,121 +882,148 @@ export default function LoadTestPanel({
                         </ul>
                       )}
                     </div>
-                  ) : (
-                    <div className="loadtest-sampler-request-head">
-                      <div className="loadtest-sampler-request-identity">
-                        <span className="loadtest-sampler-request-kicker">集合请求</span>
-                        <span
-                          className="loadtest-sampler-request-name"
-                          title={
-                            linkedRequest?.name || plan.sampler.name?.trim() || plan.sampler.url || ""
-                          }
-                        >
-                          {linkedRequest?.name ||
-                            plan.sampler.name?.trim() ||
-                            (samplerHasTarget ? "手动配置采样器" : "未绑定，请导入或填写下方 URL")}
-                        </span>
-                      </div>
+                  ) : linkedRequest ? (
+                    <div className="loadtest-sampler-linked-line">
+                      <span className={`method-tag method-${linkedRequest.method.toLowerCase()}`}>
+                        {linkedRequest.method}
+                      </span>
+                      <span className="loadtest-sampler-linked-name" title={linkedRequest.name}>
+                        {linkedRequest.name}
+                      </span>
+                      <span
+                        className="loadtest-sampler-linked-url hint"
+                        title={plan.sampler.url || linkedRequest.url}
+                      >
+                        {plan.sampler.url.trim() || linkedRequest.url}
+                      </span>
                       <button
                         type="button"
-                        className="nav-btn nav-btn--compact loadtest-sampler-collection-btn"
+                        className="nav-btn nav-btn--compact nav-btn--ghost"
                         disabled={!canPickFromCollection}
                         onClick={() => setImportFromCollectionOpen(true)}
                       >
-                        {samplerHasTarget || linkedRequest ? "更换" : "从集合导入"}
+                        更换
                       </button>
                     </div>
+                  ) : (
+                    <p className="loadtest-sampler-import-banner">
+                      <span className="loadtest-sampler-import-banner-icon" aria-hidden>
+                        💡
+                      </span>
+                      你可以{" "}
+                      <button
+                        type="button"
+                        className="loadtest-sampler-import-link"
+                        disabled={!canPickFromCollection}
+                        onClick={() => setImportFromCollectionOpen(true)}
+                      >
+                        从集合导入请求
+                      </button>
+                      或手动填写下方 URL。
+                    </p>
                   )}
                 </div>
               ) : null}
 
-              <label className="loadtest-field loadtest-sampler-url-field">
-                <span>请求地址</span>
-                <div className="loadtest-sampler-row">
-                  <select
-                    className="workbench-method"
-                    value={plan.sampler.method}
-                    onChange={(e) =>
-                      setPlan((p) => ({ ...p, sampler: { ...p.sampler, method: e.target.value } }))
-                    }
-                    aria-label="HTTP 方法"
-                  >
-                    {HTTP_METHODS.map((m) => (
-                      <option key={m} value={m}>
-                        {m}
-                      </option>
-                    ))}
-                  </select>
-                  <input
-                    className="text-input loadtest-url"
-                    value={plan.sampler.url}
-                    placeholder="https://host/path 或 {{base_url}}/path"
+              <div className="loadtest-sampler-compose">
+                <label className="loadtest-sampler-url-block">
+                  <span className="loadtest-sampler-field-label loadtest-sampler-field-label--url">请求地址</span>
+                  <div className="loadtest-sampler-url-unified">
+                    <div className="workbench-method-group" aria-label="HTTP 方法">
+                      <AppCustomSelect
+                        variant="method"
+                        className="workbench-method--verb"
+                        triggerClassName="workbench-method--verb"
+                        value={plan.sampler.method}
+                        ariaLabel="HTTP 方法"
+                        options={HTTP_METHODS.map((m) => ({ value: m, label: m }))}
+                        onChange={(method) =>
+                          setPlan((p) => ({ ...p, sampler: { ...p.sampler, method } }))
+                        }
+                      />
+                    </div>
+                    <input
+                      className="text-input workbench-url-input loadtest-sampler-url-input"
+                      value={plan.sampler.url}
+                      placeholder="https://host/path 或 {{base_url}}/path"
+                      spellCheck={false}
+                      onChange={(e) =>
+                        setPlan((p) => ({ ...p, sampler: { ...p.sampler, url: e.target.value } }))
+                      }
+                    />
+                  </div>
+                  {!samplerHasTarget ? (
+                    <p className="loadtest-field-error" role="alert">
+                      请输入 URL 后才能生成 JMX
+                    </p>
+                  ) : null}
+                </label>
+                <label className="loadtest-sampler-body-block">
+                  <span className="loadtest-sampler-field-label loadtest-sampler-field-label--body">
+                    <strong>请求体</strong>
+                    <span className="loadtest-sampler-field-suffix">(BODY)</span>
+                  </span>
+                  <textarea
+                    className="loadtest-sampler-body-editor"
+                    value={plan.sampler.body}
+                    placeholder='例如 {"key": "value"} — 无正文可留空'
+                    title="无正文可留空"
                     spellCheck={false}
                     onChange={(e) =>
-                      setPlan((p) => ({ ...p, sampler: { ...p.sampler, url: e.target.value } }))
+                      setPlan((p) => ({
+                        ...p,
+                        sampler: { ...p.sampler, bodyMode: "raw", body: e.target.value },
+                      }))
                     }
                   />
-                </div>
-              </label>
-              <label className="loadtest-field loadtest-sampler-body-field">
-                <span>Body（raw）</span>
-                <textarea
-                  className="workbench-body-textarea"
-                  value={plan.sampler.body}
-                  spellCheck={false}
-                  onChange={(e) =>
-                    setPlan((p) => ({
-                      ...p,
-                      sampler: { ...p.sampler, bodyMode: "raw", body: e.target.value },
-                    }))
-                  }
-                />
-              </label>
+                </label>
+              </div>
+              </div>
             </div>
           )}
 
-          {mainTab === "report" && (
-            <BenchmarkResults
-              report={report}
-              running={running}
-              project={project}
-              onToast={showToast}
-              onOpenHistory={() => setMainTab("history")}
-            />
-          )}
-
-          {mainTab === "history" && (
+          <div
+            className={mainTab === "history" ? "loadtest-history-host" : "loadtest-history-host loadtest-history-host--hidden"}
+            hidden={mainTab !== "history"}
+            aria-hidden={mainTab !== "history"}
+          >
             <LoadTestHistoryPanel
               project={project}
-              currentReport={report}
+              active={mainTab === "history"}
+              currentReport={null}
               onToast={showToast}
               onHistoryCountChange={setPerfHistoryCount}
+              onNavigateTab={goMainTab}
+              environment={envName}
             />
-          )}
+          </div>
 
           {mainTab === "jmeterRun" && (
             <JmeterRunPanel
               project={project}
               onToast={showToast}
+              initialJmxPath={jmeterPreset?.jmxPath}
+              initialOutputDir={jmeterPreset?.outputDir}
+              autoRunKey={jmeterPreset?.autoRunKey}
+              fromLoadTestConfig={jmeterPreset?.fromConfig ?? false}
               onRunFinished={({ jtlPath, jmxPath }) => {
                 setPendingJtlPath(jtlPath);
                 void (async () => {
                   if (!project) {
-                    setMainTab("jmeterJtl");
+                    goMainTab("jmeterJtl");
                     showToast("已跳转 JTL 报告页");
                     return;
                   }
-                  const archived = await archiveJmeterJtlToPerf(project, jtlPath, jmxPath);
+                  const archived = await archiveJmeterJtlToPerf(project, jtlPath, jmxPath, jtlStreamMode);
                   if (archived.ok) {
-                    const list = await window.atp.listPerfReports(project, 200);
-                    setPerfHistoryCount(list.length);
-                    setMainTab("history");
+                    refreshPerfHistoryCount();
+                    goMainTab("jmeterJtl");
                     showToast(
-                      `JMX 执行完成，已写入压测历史（${archived.relativePath ?? "perf"}）`,
+                      `JMX 执行完成，已载入 JTL；压测历史已存档（${archived.relativePath ?? "perf"}）`,
                       "success",
                     );
                   } else {
-                    setMainTab("jmeterJtl");
+                    goMainTab("jmeterJtl");
                     showToast(archived.error ?? "未能写入压测历史，请在 JTL 报告页手动加载");
                   }
                 })();
@@ -964,25 +1037,12 @@ export default function LoadTestPanel({
               envName={envName}
               onToast={showToast}
               initialJtlPath={pendingJtlPath}
+              jtlStreamMode={jtlStreamMode}
             />
           )}
           </div>
         </section>
       </div>
-
-      <EnvVariablesDialog
-        open={envDialogOpen}
-        project={project}
-        envName={envName}
-        sampler={plan.sampler}
-        variableNames={collectTemplateVarNames(plan.sampler)}
-        onCancel={() => setEnvDialogOpen(false)}
-        onSaved={() => {
-          setEnvDialogOpen(false);
-          void window.atp.getProjectVariables(project, envName).then(setVariables);
-          showToast("环境变量已保存，可重新启动压测");
-        }}
-      />
 
     </div>
   );

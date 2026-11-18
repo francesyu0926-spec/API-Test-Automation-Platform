@@ -1,4 +1,5 @@
 import type { JtlSample } from "./jtl";
+import { jtlSampleErrorMessage } from "./jtlTextRepair";
 
 function percentile(sorted: number[], p: number): number {
   if (!sorted.length) return 0;
@@ -26,6 +27,19 @@ export type JmeterStatRow = {
   receivedKBytesPerSec: number;
   sentKBytesPerSec: number;
 };
+
+/** JTL Dashboard 展示用时间：`YYYY-MM-DD HH:mm:ss` */
+export function formatJmeterReportTime(ms: number): string {
+  const d = new Date(ms);
+  if (!Number.isFinite(d.getTime())) return "—";
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  const h = String(d.getHours()).padStart(2, "0");
+  const min = String(d.getMinutes()).padStart(2, "0");
+  const sec = String(d.getSeconds()).padStart(2, "0");
+  return `${y}-${m}-${day} ${h}:${min}:${sec}`;
+}
 
 export type JmeterTestInfo = {
   sourceFile: string;
@@ -154,23 +168,29 @@ function statRowForGroup(label: string, group: JtlSample[], wallMs: number): Jme
   };
 }
 
+export function buildJmeterTestInfoFromRange(
+  startMs: number,
+  endMs: number,
+  sourceFile: string,
+): JmeterTestInfo {
+  return {
+    sourceFile,
+    startTime: formatJmeterReportTime(startMs),
+    endTime: formatJmeterReportTime(endMs),
+    startTimeMs: startMs,
+    endTimeMs: endMs,
+    durationMs: Math.max(0, endMs - startMs),
+  };
+}
+
 export function buildJmeterTestInfo(samples: JtlSample[], sourceFile: string): JmeterTestInfo {
   const ts = samples.map((s) => s.timeStamp).filter((t) => t > 0);
   const startMs = ts.length ? Math.min(...ts) : Date.now();
   const endMs = ts.length ? Math.max(...ts) : startMs;
-  const fmt = (ms: number) =>
-    new Date(ms).toLocaleString("zh-CN", {
-      year: "2-digit",
-      month: "numeric",
-      day: "numeric",
-      hour: "numeric",
-      minute: "2-digit",
-      hour12: true,
-    });
   return {
     sourceFile,
-    startTime: fmt(startMs),
-    endTime: fmt(endMs),
+    startTime: formatJmeterReportTime(startMs),
+    endTime: formatJmeterReportTime(endMs),
     startTimeMs: startMs,
     endTimeMs: endMs,
     durationMs: Math.max(0, endMs - startMs),
@@ -200,7 +220,7 @@ export function buildJmeterErrors(samples: JtlSample[]): JmeterErrorRow[] {
   const total = samples.length;
   const map = new Map<string, number>();
   for (const s of failed) {
-    const msg = [s.responseCode, s.responseMessage].filter(Boolean).join(" ").trim() || "failure";
+    const msg = jtlSampleErrorMessage(s);
     map.set(msg, (map.get(msg) ?? 0) + 1);
   }
   const totalErr = failed.length;
@@ -217,7 +237,7 @@ export function buildTop5ErrorsBySampler(samples: JtlSample[]): JmeterSamplerErr
   const failed = samples.filter((s) => !s.success);
   const map = new Map<string, JmeterSamplerErrorRow>();
   for (const s of failed) {
-    const message = [s.responseCode, s.responseMessage].filter(Boolean).join(" ").trim() || "failure";
+    const message = jtlSampleErrorMessage(s);
     const key = `${s.label}\0${message}`;
     const cur = map.get(key);
     if (cur) cur.count += 1;

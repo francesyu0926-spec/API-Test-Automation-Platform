@@ -21,7 +21,27 @@ export type LoadTestPlan = {
 export type LoadTestConfigNode = "plan" | "threadGroup" | "httpSampler";
 
 /** 顶栏主视图：左侧树仅用于 config */
-export type LoadTestMainTab = "config" | "report" | "history" | "jmeterRun" | "jmeterJtl";
+export type LoadTestMainTab = "config" | "history" | "jmeterRun" | "jmeterJtl";
+
+const LOAD_MAIN_TAB_STORAGE_KEY = "atp.loadTest.mainTab";
+
+export function loadPersistedLoadMainTab(): LoadTestMainTab | null {
+  try {
+    const raw = sessionStorage.getItem(LOAD_MAIN_TAB_STORAGE_KEY);
+    if (raw === "config" || raw === "history" || raw === "jmeterRun" || raw === "jmeterJtl") return raw;
+  } catch {
+    /* ignore */
+  }
+  return null;
+}
+
+export function persistLoadMainTab(tab: LoadTestMainTab): void {
+  try {
+    sessionStorage.setItem(LOAD_MAIN_TAB_STORAGE_KEY, tab);
+  } catch {
+    /* ignore */
+  }
+}
 
 export type LoadTestTreeNode =
   | LoadTestConfigNode

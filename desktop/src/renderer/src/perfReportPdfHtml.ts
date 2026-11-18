@@ -1,5 +1,6 @@
 import type { HttpBenchmarkReport } from "../../shared/apiWorkbenchTypes";
 import type { AggregateReportRow, BenchmarkErrorSummary } from "./aggregateReportTable";
+import { formatPerfStartedAtLocal } from "./perfDateTime";
 import { mergeReportsStats, mergeStatusCodes } from "./perfReportMerge";
 
 export type PerfReportVisualInput = {
@@ -132,7 +133,7 @@ export function buildMultiPerfReportPdfHtml(input: MultiPerfReportPdfInput): str
   const runListBody = reports
     .map(
       (r) => `<tr>
-      <td>${esc(r.startedAt.replace("T", " ").slice(0, 19))}</td>
+      <td>${esc(formatPerfStartedAtLocal(r.startedAt))}</td>
       <td><code>${esc(r.request.method)} ${esc(r.request.name || r.request.url)}</code></td>
       <td class="num">${r.stats.samples}</td>
       <td class="num">${r.stats.success}</td>

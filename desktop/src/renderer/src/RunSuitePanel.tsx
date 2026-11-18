@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 
 import type { SuiteRunTarget } from "./resolveSuiteRunTargets";
+import AppCustomSelect from "./AppCustomSelect";
 
 type Project = { id: string; name: string };
 

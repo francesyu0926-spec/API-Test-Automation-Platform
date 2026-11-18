@@ -1,5 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams, type SpawnOptions } from "node:child_process";
 import fs from "node:fs/promises";
+import { access as fsAccess } from "node:fs/promises";
 import path from "node:path";
 
 export type JmeterLogSink = (text: string) => void;
@@ -21,6 +22,8 @@ export type RunJmeterOptions = {
   jmeterHome?: string;
   /** 生成 HTML Dashboard（-e -o report） */
   generateReport?: boolean;
+  /** 传入 jmeter.bat 的 JVM_ARGS，如 -Xmx2g */
+  jvmArgs?: string;
 };
 
 export type RunJmeterResult = {
@@ -47,18 +50,88 @@ function jmeterBinPath(home: string): string {
   return base;
 }
 
-export async function detectJmeter(customHome?: string): Promise<JmeterDetectResult> {
-  const home = customHome?.trim() || jmeterHomeFromEnv();
-  if (!home) {
-    return { found: false, error: "未设置 JMETER_HOME，也未指定 JMeter 目录" };
-  }
+async function jmeterHomeValid(home: string): Promise<JmeterDetectResult> {
   const bin = jmeterBinPath(home);
   try {
     await fs.access(bin);
-    return { found: true, jmeterHome: home, jmeterBin: bin };
+    return { found: true, jmeterHome: path.resolve(home), jmeterBin: bin };
   } catch {
     return { found: false, jmeterHome: home, error: `未找到可执行文件：${bin}` };
   }
+}
+
+async function discoverJmeterHomes(): Promise<string[]> {
+  const seen = new Set<string>();
+  const ordered: string[] = [];
+  const push = (home: string | undefined) => {
+    const h = home?.trim();
+    if (!h) return;
+    const key = path.resolve(h).toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    ordered.push(path.resolve(h));
+  };
+
+  push(jmeterHomeFromEnv());
+
+  const pathEnv = process.env.PATH ?? "";
+  const sep = process.platform === "win32" ? ";" : ":";
+  const binName = process.platform === "win32" ? "jmeter.bat" : "jmeter";
+  for (const dir of pathEnv.split(sep)) {
+    const trimmed = dir.trim();
+    if (!trimmed) continue;
+    const inBin = path.join(trimmed, binName);
+    try {
+      await fsAccess(inBin);
+      if (path.basename(trimmed).toLowerCase() === "bin") {
+        push(path.dirname(trimmed));
+      }
+    } catch {
+      /* not in this PATH entry */
+    }
+  }
+
+  if (process.platform === "win32") {
+    const scanRoots = ["C:\\Program Files", "C:\\Program Files (x86)", "C:\\"];
+    for (const root of scanRoots) {
+      let entries: { name: string; isDirectory(): boolean }[] = [];
+      try {
+        entries = await fs.readdir(root, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      for (const ent of entries) {
+        if (!ent.isDirectory()) continue;
+        if (!/apache[- ]?jmeter|jmeter-\d/i.test(ent.name)) continue;
+        push(path.join(root, ent.name));
+      }
+    }
+  }
+
+  return ordered;
+}
+
+/** 在未指定目录时搜索 PATH 与常见安装路径 */
+export async function autoDetectJmeter(): Promise<JmeterDetectResult> {
+  const homes = await discoverJmeterHomes();
+  for (const home of homes) {
+    const res = await jmeterHomeValid(home);
+    if (res.found) return res;
+  }
+  return { found: false, error: "未在 JMETER_HOME、PATH 或常见安装目录找到 JMeter" };
+}
+
+export async function detectJmeter(customHome?: string): Promise<JmeterDetectResult> {
+  const trimmed = customHome?.trim();
+  if (trimmed) {
+    return jmeterHomeValid(trimmed);
+  }
+  const fromEnv = jmeterHomeFromEnv();
+  if (fromEnv) {
+    const res = await jmeterHomeValid(fromEnv);
+    if (res.found) return res;
+  }
+  return autoDetectJmeter();
 }
 
 function killJmeterTree(userCancel: boolean): boolean {
@@ -167,11 +240,13 @@ export async function runJmeterTest(opts: RunJmeterOptions, onLog?: JmeterLogSin
   cancelRequested = false;
   const stdoutChunks: string[] = [];
   const stderrChunks: string[] = [];
+  const jvmArgs = opts.jvmArgs?.trim();
 
   emit(
     [
       "──────── JMeter 非 GUI 执行 ────────",
       `JMETER_HOME: ${detect.jmeterHome}`,
+      ...(jvmArgs ? [`JVM_ARGS: ${jvmArgs}`] : []),
       `计划: ${jmxPath}`,
       `JTL: ${jtlPath}`,
       `日志: ${logPath}`,
@@ -237,7 +312,11 @@ export async function runJmeterTest(opts: RunJmeterOptions, onLog?: JmeterLogSin
     const child = spawnJmeter(detect.jmeterBin!, args, {
       cwd: outputDir,
       windowsHide: true,
-      env: { ...process.env, JMETER_HOME: detect.jmeterHome },
+      env: {
+        ...process.env,
+        JMETER_HOME: detect.jmeterHome,
+        ...(jvmArgs ? { JVM_ARGS: jvmArgs } : {}),
+      },
     });
     activeChild = child;
 

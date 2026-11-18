@@ -16,6 +16,12 @@ export function emptyRow(): KeyValueRow {
   return { key: "", value: "", enabled: true };
 }
 
+/** Editor UI: content rows plus a single trailing blank row. */
+export function normalizeEditorKvRows(rows: KeyValueRow[]): KeyValueRow[] {
+  const filled = rows.filter((r) => r.key.trim() || r.value.trim());
+  return [...filled, emptyRow()];
+}
+
 export function defaultDraft(): WorkbenchDraft {
   return {
     method: "GET",
@@ -231,8 +237,8 @@ export function captureTxToDraft(tx: unknown): WorkbenchDraft {
     })(),
     method,
     url: baseUrl,
-    headers: promoted.headers,
-    query: promoted.query,
+    headers: normalizeEditorKvRows(promoted.headers),
+    query: normalizeEditorKvRows(promoted.query),
     bodyMode,
     body,
     bodyContentType: inferBodyContentType(rawHeaders, body),

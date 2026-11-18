@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import ConfirmDialog from "./ConfirmDialog";
 
@@ -57,37 +57,105 @@ function toDateInputValue(d: Date): string {
   return `${y}-${m}-${day}`;
 }
 
-function FilterTagRow({ label, children }: { label: string; children: ReactNode }) {
+type FilterPillIcon = "filter" | "calendar";
+
+function FilterPillLeadIcon({ type }: { type: FilterPillIcon }) {
+  if (type === "calendar") {
+    return (
+      <svg className="run-filter-pill-svg" width="13" height="13" viewBox="0 0 24 24" aria-hidden>
+        <path
+          fill="currentColor"
+          d="M19 4h-1V2h-2v2H8V2H6v2H5a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2V6a2 2 0 00-2-2zm0 16H5V9h14v11zM7 11h2v2H7v-2zm4 0h2v2h-2v-2zm4 0h2v2h-2v-2z"
+        />
+      </svg>
+    );
+  }
   return (
-    <div className="run-filter-row">
-      <span className="run-filter-row-label">{label}</span>
-      <div className="run-filter-row-tags">{children}</div>
+    <svg className="run-filter-pill-svg" width="13" height="13" viewBox="0 0 24 24" aria-hidden>
+      <path fill="currentColor" d="M4 6h16v2H4V6zm3 5h10v2H7v-2zm-4 5h18v2H3v-2z" />
+    </svg>
+  );
+}
+
+function FilterPill({
+  dim,
+  valueLabel,
+  active,
+  open,
+  onToggle,
+  showDefaultIcon,
+  defaultIcon,
+  children,
+}: {
+  dim: string;
+  valueLabel: string;
+  active: boolean;
+  open: boolean;
+  onToggle: () => void;
+  showDefaultIcon?: boolean;
+  defaultIcon?: FilterPillIcon;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className={`run-filter-pill-wrap${open ? " run-filter-pill-wrap--open" : ""}`}>
+      <button
+        type="button"
+        className={`run-filter-pill${active ? " run-filter-pill--active" : ""}${open ? " run-filter-pill--open" : ""}`}
+        aria-expanded={open}
+        onClick={onToggle}
+      >
+        <span className="run-filter-pill-dim">{dim}</span>
+        <span className="run-filter-pill-val" title={valueLabel}>
+          {showDefaultIcon ? (
+            <span className="run-filter-pill-val-inner">
+              <FilterPillLeadIcon type={defaultIcon ?? "filter"} />
+              {valueLabel}
+            </span>
+          ) : (
+            valueLabel
+          )}
+        </span>
+        <span className="run-filter-pill-chev" aria-hidden>
+          ▾
+        </span>
+      </button>
+      {open ? <div className="run-filter-dropdown">{children}</div> : null}
     </div>
   );
 }
 
-function FilterTag({
-  active,
+function FilterMenuItem({
+  selected,
   onClick,
   children,
   title,
 }: {
-  active: boolean;
+  selected: boolean;
   onClick: () => void;
-  children: ReactNode;
+  children: React.ReactNode;
   title?: string;
 }) {
   return (
     <button
       type="button"
-      className={`run-filter-tag${active ? " run-filter-tag--active" : ""}`}
-      onClick={onClick}
+      role="menuitemradio"
+      aria-checked={selected}
+      className={`run-filter-menu-item${selected ? " run-filter-menu-item--selected" : ""}`}
       title={title}
-      aria-pressed={active}
+      onClick={onClick}
     >
-      {children}
+      <span className="run-filter-menu-item-label">{children}</span>
+      {selected ? (
+        <span className="run-filter-menu-check" aria-hidden>
+          ✓
+        </span>
+      ) : null}
     </button>
   );
+}
+
+function formatPillDate(isoDate: string): string {
+  return isoDate.replace(/-/g, "/");
 }
 
 type ProjectOption = { id: string; name: string };
@@ -95,8 +163,12 @@ type ProjectOption = { id: string; name: string };
 type Props = {
   runs: RunHistoryRow[];
   projects: ProjectOption[];
+  /** 侧栏已选项目时锁定筛选，不再显示「项目」胶囊 */
+  scopeProjectId?: string | null;
   selectedRunId: string | null;
   onSelect: (runId: string) => void;
+  /** 当前选中记录不在筛选结果内时回调（避免下方仍展示旧详情） */
+  onClearSelection?: () => void;
   onRunsDeleted?: (deletedIds: string[]) => void;
   onNotify?: (message: string) => void;
 };
@@ -104,8 +176,10 @@ type Props = {
 export default function RunsHistoryTable({
   runs,
   projects,
+  scopeProjectId,
   selectedRunId,
   onSelect,
+  onClearSelection,
   onRunsDeleted,
   onNotify,
 }: Props) {
@@ -118,7 +192,15 @@ export default function RunsHistoryTable({
   const [toTime, setToTime] = useState("");
   const [timePreset, setTimePreset] = useState<TimePreset>("");
   const [timePrecision, setTimePrecision] = useState(false);
-  const [moreOpen, setMoreOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [openMenu, setOpenMenu] = useState<FilterMenuId | null>(null);
+  const [timeCustomExpanded, setTimeCustomExpanded] = useState(false);
+  const [draftFromDate, setDraftFromDate] = useState("");
+  const [draftToDate, setDraftToDate] = useState("");
+  const [draftFromTime, setDraftFromTime] = useState("");
+  const [draftToTime, setDraftToTime] = useState("");
+  const [draftTimePrecision, setDraftTimePrecision] = useState(false);
+  const filterBarRef = useRef<HTMLDivElement>(null);
   const [page, setPage] = useState(1);
   const [checkedIds, setCheckedIds] = useState<Set<string>>(() => new Set());
   const [deleteBusy, setDeleteBusy] = useState(false);
@@ -148,6 +230,11 @@ export default function RunsHistoryTable({
     setToDate("");
     setToTime("");
     setTimePreset("");
+    setDraftFromDate("");
+    setDraftToDate("");
+    setDraftFromTime("");
+    setDraftToTime("");
+    setDraftTimePrecision(false);
   };
 
   const rangeStart = useMemo(() => combineRangeStart(fromDate, fromTime), [fromDate, fromTime]);
@@ -175,16 +262,18 @@ export default function RunsHistoryTable({
   const filtered = useMemo(() => {
     const fromMs = parseLocalDateTime(rangeStart);
     const toMs = parseLocalDateTime(rangeEnd);
+    const q = searchQuery.trim().toLowerCase();
     return runs.filter((r) => {
       if (projectFilter && r.project !== projectFilter) return false;
       if (envFilter && r.environment !== envFilter) return false;
       if (statusFilter && r.status !== statusFilter) return false;
+      if (q && !r.suite.toLowerCase().includes(q) && !r.id.toLowerCase().includes(q)) return false;
       const started = parseRunInstant(r.started_at);
       if (fromMs != null && started != null && started < fromMs) return false;
       if (toMs != null && started != null && started > toMs) return false;
       return true;
     });
-  }, [runs, projectFilter, envFilter, statusFilter, rangeStart, rangeEnd]);
+  }, [runs, projectFilter, envFilter, statusFilter, rangeStart, rangeEnd, searchQuery]);
 
   const pageCount = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE) || 1);
   const paged = useMemo(() => {
@@ -192,22 +281,101 @@ export default function RunsHistoryTable({
     return filtered.slice(start, start + PAGE_SIZE);
   }, [filtered, page]);
 
+  const projectLocked = Boolean(scopeProjectId?.trim());
+
+  useEffect(() => {
+    if (scopeProjectId?.trim()) setProjectFilter(scopeProjectId.trim());
+  }, [scopeProjectId]);
+
   const hasActiveFilters = Boolean(
-    projectFilter || envFilter || statusFilter || fromDate || fromTime || toDate || toTime,
+    (projectFilter && (!projectLocked || projectFilter !== scopeProjectId)) ||
+      envFilter ||
+      statusFilter ||
+      fromDate ||
+      fromTime ||
+      toDate ||
+      toTime ||
+      searchQuery.trim(),
   );
 
   const clearFilters = () => {
-    setProjectFilter("");
+    if (projectLocked && scopeProjectId) setProjectFilter(scopeProjectId);
+    else setProjectFilter("");
     setEnvFilter("");
     setStatusFilter("");
     clearTimeRange();
     setTimePrecision(false);
-    setMoreOpen(false);
+    setTimeCustomExpanded(false);
+    setSearchQuery("");
+    setOpenMenu(null);
+  };
+
+  const syncTimeDraftFromApplied = () => {
+    setDraftFromDate(fromDate);
+    setDraftToDate(toDate);
+    setDraftFromTime(fromTime);
+    setDraftToTime(toTime);
+    setDraftTimePrecision(timePrecision);
+  };
+
+  const toggleMenu = (id: FilterMenuId) => {
+    setOpenMenu((prev) => {
+      const next = prev === id ? null : id;
+      if (next === "time" && (timePreset === "custom" || timeCustomActive)) {
+        setTimeCustomExpanded(true);
+        syncTimeDraftFromApplied();
+      }
+      return next;
+    });
+  };
+
+  const openTimeCustom = () => {
+    setTimeCustomExpanded(true);
+    setTimePreset("custom");
+    syncTimeDraftFromApplied();
+  };
+
+  const applyCustomTimeRange = () => {
+    if (!draftFromDate && !draftToDate) return;
+    setFromDate(draftFromDate);
+    setToDate(draftToDate);
+    setFromTime(draftTimePrecision ? draftFromTime : "");
+    setToTime(draftTimePrecision ? draftToTime : "");
+    setTimePrecision(draftTimePrecision);
+    setTimePreset("custom");
+    setTimeCustomExpanded(false);
+    setOpenMenu(null);
+  };
+
+  const pickOption = (after: () => void) => {
+    after();
+    setTimeCustomExpanded(false);
+    setOpenMenu(null);
   };
 
   useEffect(() => {
+    if (!openMenu) {
+      setTimeCustomExpanded(false);
+      return;
+    }
+    const onDoc = (e: MouseEvent) => {
+      const root = filterBarRef.current;
+      if (root && !root.contains(e.target as Node)) setOpenMenu(null);
+    };
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, [openMenu]);
+
+  useEffect(() => {
     setPage(1);
-  }, [projectFilter, envFilter, statusFilter, fromDate, fromTime, toDate, toTime, runs]);
+  }, [projectFilter, envFilter, statusFilter, fromDate, fromTime, toDate, toTime, searchQuery, runs]);
+
+  useEffect(() => {
+    if (!selectedRunId || !onClearSelection) return;
+    if (!filtered.some((r) => r.id === selectedRunId)) {
+      onClearSelection();
+    }
+  }, [filtered, selectedRunId, onClearSelection]);
 
   useEffect(() => {
     if (page > pageCount) setPage(pageCount);
@@ -303,208 +471,249 @@ export default function RunsHistoryTable({
     }
   };
 
-  const timeCustomActive =
-    timePreset === "custom" || (Boolean(fromDate || toDate) && timePreset !== "today" && timePreset !== "7d" && timePreset !== "30d");
+  const timeCustomActive = timePreset === "custom";
+
+  const projectPillLabel = projectFilter ? resolveProjectName(projectFilter) : "不限";
+  const envPillLabel = envFilter || "不限";
+  const statusPillLabel = statusFilter || "不限";
+
+  const timePillLabel = (() => {
+    if (timePreset === "today") return "今天";
+    if (timePreset === "7d") return "近 7 天";
+    if (timePreset === "30d") return "近 30 天";
+    if (timePreset === "custom") {
+      if (fromDate && toDate) return `${formatPillDate(fromDate)} ~ ${formatPillDate(toDate)}`;
+      return "自定义";
+    }
+    return "全部";
+  })();
+
+  const timeFilterActive = Boolean(timePreset);
 
   return (
     <>
-      <section className="run-filter-panel" role="search" aria-label="筛选执行记录">
-        <div className="run-filter-panel-head">
-          <h4 className="run-filter-panel-title">条件筛选</h4>
-          <span className="run-history-toolbar-meta">
-            {filtered.length === runs.length
-              ? `共 ${runs.length} 条`
-              : `匹配 ${filtered.length} / ${runs.length} 条`}
-          </span>
-          {hasActiveFilters ? (
-            <button type="button" className="run-filter-reset-link" onClick={clearFilters}>
-              重置条件
-            </button>
-          ) : null}
-        </div>
-
-        <div className="run-filter-panel-body">
-          <FilterTagRow label="项目">
-            <FilterTag active={!projectFilter} onClick={() => setProjectFilter("")}>
-              不限
-            </FilterTag>
-            {projectOptions.map((p) => (
-              <FilterTag
-                key={p.id}
-                active={projectFilter === p.id}
-                onClick={() => setProjectFilter(p.id)}
-                title={`${p.name}（${p.id}）`}
-              >
-                {p.name}
-              </FilterTag>
-            ))}
-          </FilterTagRow>
-
-          <FilterTagRow label="环境">
-            <FilterTag active={!envFilter} onClick={() => setEnvFilter("")}>
-              不限
-            </FilterTag>
-            {envOptions.map((e) => (
-              <FilterTag key={e} active={envFilter === e} onClick={() => setEnvFilter(e)}>
-                {e}
-              </FilterTag>
-            ))}
-          </FilterTagRow>
-
-          <FilterTagRow label="状态">
-            {STATUS_OPTIONS.map((s) => (
-              <FilterTag
-                key={s.id || "all"}
-                active={statusFilter === s.id}
-                onClick={() => setStatusFilter(s.id)}
-              >
-                {s.label}
-              </FilterTag>
-            ))}
-          </FilterTagRow>
-
-          <FilterTagRow label="时间">
-            <FilterTag active={!timeCustomActive && !timePreset} onClick={clearTimeRange}>
-              不限
-            </FilterTag>
-            <FilterTag active={timePreset === "today"} onClick={() => applyPresetDays("today", 1)}>
-              今天
-            </FilterTag>
-            <FilterTag active={timePreset === "7d"} onClick={() => applyPresetDays("7d", 7)}>
-              近 7 天
-            </FilterTag>
-            <FilterTag active={timePreset === "30d"} onClick={() => applyPresetDays("30d", 30)}>
-              近 30 天
-            </FilterTag>
-            <FilterTag
-              active={timeCustomActive && timePreset === "custom"}
-              onClick={() => {
-                setTimePreset("custom");
-                setMoreOpen(true);
-              }}
+      <section className="run-filter-panel run-filter-panel--compact" role="search" aria-label="筛选执行记录">
+        <div className="run-filter-bar" ref={filterBarRef}>
+          {!projectLocked ? (
+            <FilterPill
+              dim="项目"
+              valueLabel={projectPillLabel}
+              active={Boolean(projectFilter)}
+              showDefaultIcon={!projectFilter}
+              defaultIcon="filter"
+              open={openMenu === "project"}
+              onToggle={() => toggleMenu("project")}
             >
-              自定义
-            </FilterTag>
-          </FilterTagRow>
-        </div>
+              <div className="run-filter-dropdown-menu" role="menu">
+                <FilterMenuItem selected={!projectFilter} onClick={() => pickOption(() => setProjectFilter(""))}>
+                  不限
+                </FilterMenuItem>
+                {projectOptions.map((p) => (
+                  <FilterMenuItem
+                    key={p.id}
+                    selected={projectFilter === p.id}
+                    title={`${p.name}（${p.id}）`}
+                    onClick={() => pickOption(() => setProjectFilter(p.id))}
+                  >
+                    {p.name}
+                  </FilterMenuItem>
+                ))}
+              </div>
+            </FilterPill>
+          ) : null}
 
-        <button
-          type="button"
-          className="run-filter-more-toggle"
-          aria-expanded={moreOpen}
-          onClick={() => setMoreOpen((v) => !v)}
-        >
-          <span>{moreOpen ? "收起更多条件" : "展开更多条件"}</span>
-          <span className="run-filter-more-chevron" aria-hidden>
-            {moreOpen ? "▴" : "▾"}
-          </span>
-        </button>
+          <FilterPill
+            dim="环境"
+            valueLabel={envPillLabel}
+            active={Boolean(envFilter)}
+              showDefaultIcon={!envFilter}
+              defaultIcon="filter"
+              open={openMenu === "env"}
+            onToggle={() => toggleMenu("env")}
+          >
+            <div className="run-filter-dropdown-menu" role="menu">
+              <FilterMenuItem selected={!envFilter} onClick={() => pickOption(() => setEnvFilter(""))}>
+                不限
+              </FilterMenuItem>
+              {envOptions.map((e) => (
+                <FilterMenuItem
+                  key={e}
+                  selected={envFilter === e}
+                  onClick={() => pickOption(() => setEnvFilter(e))}
+                >
+                  {e}
+                </FilterMenuItem>
+              ))}
+            </div>
+          </FilterPill>
 
-        {moreOpen ? (
-          <div className="run-filter-more-panel">
-            <div className="run-filter-custom-range">
-              <label className="run-filter-custom-field">
-                <span className="run-filter-custom-label">开始日期</span>
-                <input
-                  type="date"
-                  className="text-input run-filter-date"
-                  value={fromDate}
-                  onChange={(e) => {
-                    setFromDate(e.target.value);
-                    setTimePreset("custom");
-                  }}
-                />
-              </label>
-              {timePrecision ? (
-                <label className="run-filter-custom-field run-filter-custom-field--time">
-                  <span className="run-filter-custom-label">时刻</span>
-                  <input
-                    type="time"
-                    className="text-input run-filter-time"
-                    value={fromTime}
-                    onChange={(e) => setFromTime(e.target.value)}
-                    step={60}
-                  />
-                </label>
-              ) : null}
-              <span className="run-filter-range-sep">至</span>
-              <label className="run-filter-custom-field">
-                <span className="run-filter-custom-label">结束日期</span>
-                <input
-                  type="date"
-                  className="text-input run-filter-date"
-                  value={toDate}
-                  onChange={(e) => {
-                    setToDate(e.target.value);
-                    setTimePreset("custom");
-                  }}
-                />
-              </label>
-              {timePrecision ? (
-                <label className="run-filter-custom-field run-filter-custom-field--time">
-                  <span className="run-filter-custom-label">时刻</span>
-                  <input
-                    type="time"
-                    className="text-input run-filter-time"
-                    value={toTime}
-                    onChange={(e) => setToTime(e.target.value)}
-                    step={60}
-                  />
-                </label>
+          <FilterPill
+            dim="状态"
+            valueLabel={statusPillLabel}
+            active={Boolean(statusFilter)}
+            showDefaultIcon={!statusFilter}
+            defaultIcon="filter"
+            open={openMenu === "status"}
+            onToggle={() => toggleMenu("status")}
+          >
+            <div className="run-filter-dropdown-menu" role="menu">
+              {STATUS_OPTIONS.map((s) => (
+                <FilterMenuItem
+                  key={s.id || "all"}
+                  selected={statusFilter === s.id}
+                  onClick={() => pickOption(() => setStatusFilter(s.id))}
+                >
+                  {s.label}
+                </FilterMenuItem>
+              ))}
+            </div>
+          </FilterPill>
+
+          <FilterPill
+            dim="时间"
+            valueLabel={timePillLabel}
+            active={timeFilterActive}
+            showDefaultIcon
+            defaultIcon="calendar"
+            open={openMenu === "time"}
+            onToggle={() => toggleMenu("time")}
+          >
+            <div
+              className={`run-filter-dropdown-menu${timeCustomExpanded ? " run-filter-dropdown-menu--wide" : ""}`}
+              role="menu"
+            >
+              <FilterMenuItem
+                selected={!timeFilterActive}
+                onClick={() => pickOption(() => clearTimeRange())}
+              >
+                全部
+              </FilterMenuItem>
+              <FilterMenuItem
+                selected={timePreset === "today"}
+                onClick={() => pickOption(() => applyPresetDays("today", 1))}
+              >
+                今天
+              </FilterMenuItem>
+              <FilterMenuItem selected={timePreset === "7d"} onClick={() => pickOption(() => applyPresetDays("7d", 7))}>
+                近 7 天
+              </FilterMenuItem>
+              <FilterMenuItem
+                selected={timePreset === "30d"}
+                onClick={() => pickOption(() => applyPresetDays("30d", 30))}
+              >
+                近 30 天
+              </FilterMenuItem>
+              <FilterMenuItem
+                selected={timeCustomExpanded || timePreset === "custom"}
+                onClick={openTimeCustom}
+              >
+                自定义
+              </FilterMenuItem>
+              {timeCustomExpanded ? (
+                <div className="run-filter-dropdown-custom">
+                  <div className="run-filter-date-range run-filter-date-range--inline">
+                    <input
+                      type="date"
+                      className="text-input run-filter-date run-filter-date--compact"
+                      value={draftFromDate}
+                      aria-label="开始日期"
+                      onChange={(e) => setDraftFromDate(e.target.value)}
+                    />
+                    <span className="run-filter-range-sep" aria-hidden>
+                      -
+                    </span>
+                    <input
+                      type="date"
+                      className="text-input run-filter-date run-filter-date--compact"
+                      value={draftToDate}
+                      aria-label="结束日期"
+                      onChange={(e) => setDraftToDate(e.target.value)}
+                    />
+                  </div>
+                  {draftTimePrecision ? (
+                    <div className="run-filter-time-range run-filter-date-range--inline">
+                      <input
+                        type="time"
+                        className="text-input run-filter-time run-filter-time--compact"
+                        value={draftFromTime}
+                        aria-label="开始时刻"
+                        onChange={(e) => setDraftFromTime(e.target.value)}
+                        step={60}
+                      />
+                      <span className="run-filter-range-sep" aria-hidden>
+                        -
+                      </span>
+                      <input
+                        type="time"
+                        className="text-input run-filter-time run-filter-time--compact"
+                        value={draftToTime}
+                        aria-label="结束时刻"
+                        onChange={(e) => setDraftToTime(e.target.value)}
+                        step={60}
+                      />
+                    </div>
+                  ) : null}
+                  <label className="run-filter-time-precision">
+                    <input
+                      type="checkbox"
+                      className="capture-session-checkbox"
+                      checked={draftTimePrecision}
+                      onChange={(e) => {
+                        setDraftTimePrecision(e.target.checked);
+                        if (!e.target.checked) {
+                          setDraftFromTime("");
+                          setDraftToTime("");
+                        }
+                      }}
+                    />
+                    精确到时刻
+                  </label>
+                  <div className="run-filter-custom-actions">
+                    <button
+                      type="button"
+                      className="primary run-filter-custom-apply"
+                      disabled={!draftFromDate && !draftToDate}
+                      onClick={applyCustomTimeRange}
+                    >
+                      应用
+                    </button>
+                  </div>
+                </div>
               ) : null}
             </div>
-            <label className="run-filter-time-precision">
-              <input
-                type="checkbox"
-                checked={timePrecision}
-                onChange={(e) => {
-                  setTimePrecision(e.target.checked);
-                  if (!e.target.checked) {
-                    setFromTime("");
-                    setToTime("");
-                  }
-                }}
-              />
-              精确到时刻
-            </label>
-          </div>
-        ) : null}
-      </section>
+          </FilterPill>
 
-      {runs.length > 0 ? (
-        <div className="run-history-bulk-toolbar">
-          <span className="run-history-bulk-hint">可多选后批量删除</span>
-          {selectedDeleteIds.length > 0 ? (
-            <span className="run-history-bulk-meta">已选 {selectedDeleteIds.length} 条</span>
-          ) : null}
-          {filtered.length > paged.length ? (
-            <button
-              type="button"
-              className="nav-btn nav-btn--compact"
-              disabled={deleteBusy}
-              onClick={selectAllFiltered}
-            >
-              全选筛选结果（{filtered.length}）
-            </button>
-          ) : null}
-          <button
-            type="button"
-            className="nav-btn nav-btn--compact danger"
-            disabled={deleteBusy || selectedDeleteIds.length === 0}
-            onClick={() => setConfirmDeleteSelected(true)}
-          >
-            删除选中
-          </button>
-          <button
-            type="button"
-            className="nav-btn nav-btn--compact danger"
-            disabled={deleteBusy || !runs.length}
-            onClick={() => setConfirmClearAll(true)}
-          >
-            清空全部
-          </button>
+          <label className="run-filter-search">
+            <span className="run-filter-search-icon" aria-hidden>
+              ⌕
+            </span>
+            <input
+              type="search"
+              className="text-input run-filter-search-input"
+              placeholder="搜索套件 / Run ID…"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              aria-label="搜索套件或 Run ID"
+            />
+          </label>
+
+          <div className="run-filter-bar-end">
+            {hasActiveFilters ? (
+              <button type="button" className="run-filter-reset-link" onClick={clearFilters}>
+                <span className="run-filter-reset-icon" aria-hidden>
+                  ↺
+                </span>
+                重置筛选
+              </button>
+            ) : null}
+            <span className="run-history-toolbar-meta run-filter-bar-meta">
+              {filtered.length === runs.length
+                ? `共 ${runs.length} 条`
+                : `匹配 ${filtered.length} / ${runs.length} 条`}
+            </span>
+          </div>
         </div>
-      ) : null}
+      </section>
 
       <div className="run-history-table-wrap">
         <table className="run-history-table">
