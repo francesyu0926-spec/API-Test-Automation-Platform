@@ -1,0 +1,30 @@
+{
+  "id": "default",
+  "name": "默认模块",
+  "folders": [],
+  "requests": [
+    {
+      "id": "d89571e8-840",
+      "name": "paymentErrorHandler",
+      "method": "GET",
+      "url": "https://www.bidding.shanxiguandian.com/api/project_register/paymentErrorHandler?registerId=8247",
+      "headers": [
+        {
+          "key": "token",
+          "value": "{{token}}",
+          "enabled": true
+        }
+      ],
+      "query": [
+        {
+          "key": "registerId",
+          "value": "8247",
+          "enabled": true
+        }
+      ],
+      "bodyMode": "none",
+      "body": "",
+      "bodyContentType": "application/json"
+    }
+  ]
+}

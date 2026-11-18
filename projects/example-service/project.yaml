@@ -1,4 +1,0 @@
-name: example-service
-description: Example API project (file-backed, no database)
-
-default_environment: dev

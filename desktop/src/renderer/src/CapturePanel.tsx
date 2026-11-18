@@ -1,8 +1,14 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import ConfirmDialog from "./ConfirmDialog";
+import CaptureSessionsDialog from "./CaptureSessionsDialog";
+import LoadingOverlay from "./LoadingOverlay";
+import SaveCaseDialog from "./SaveCaseDialog";
+import { captureTxToDraft } from "./apiWorkbenchModel";
+import { captureTxToCaseMeta, captureTxToCaseYaml } from "./caseYaml";
 import { transactionToCurl } from "./captureCurl";
 import { filterTransactions } from "./captureFilters";
+import type { WorkbenchDraft } from "../../shared/apiWorkbenchTypes";
 
 type PendingConfirm = {
   title: string;
@@ -21,9 +27,11 @@ type Props = {
   projects: { id: string; name: string }[];
   project: string;
   onProject: (id: string) => void;
+  onOpenInWorkbench?: (draft: WorkbenchDraft) => void;
+  onCaseSaved?: () => void;
 };
 
-export default function CapturePanel({ projects, project, onProject }: Props) {
+export default function CapturePanel({ projects, project, onProject, onOpenInWorkbench, onCaseSaved }: Props) {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [selectedSession, setSelectedSession] = useState<string>("");
   const [label, setLabel] = useState("");
@@ -38,20 +46,98 @@ export default function CapturePanel({ projects, project, onProject }: Props) {
   const [draftCurl, setDraftCurl] = useState("");
   const [detailToast, setDetailToast] = useState("");
   const [pendingConfirm, setPendingConfirm] = useState<PendingConfirm | null>(null);
+  const [pendingCaseOverwrite, setPendingCaseOverwrite] = useState<{
+    caseName: string;
+    addToSuite: boolean;
+    suiteName: string;
+    yaml: string;
+  } | null>(null);
+  const [saveCaseOpen, setSaveCaseOpen] = useState(false);
   const [mitm, setMitm] = useState<Awaited<ReturnType<typeof window.atp.mitmStatus>>>({ running: false });
   const [mitmAvail, setMitmAvail] = useState(false);
-  const [apiOnlyFilter] = useState(true);
+  const [apiOnlyFilter, setApiOnlyFilter] = useState(true);
+  const [trafficSearch, setTrafficSearch] = useState("");
   const [txPage, setTxPage] = useState(1);
   const [sysProxy, setSysProxy] = useState<{ enabled: boolean; server: string; autoConfigUrl?: string }>({
     enabled: false,
     server: "",
   });
+  const [sessionsDeleteOpen, setSessionsDeleteOpen] = useState(false);
+  const [trafficLoading, setTrafficLoading] = useState(false);
+  const [txDetailLoading, setTxDetailLoading] = useState(false);
   const capturing = ingest.running || mitm.running;
+  const lockedCaptureSessionId =
+    ingest.running && ingest.sessionId && ingest.project === project ? ingest.sessionId : null;
+  const activeSessionId =
+    ingest.running && ingest.sessionId ? ingest.sessionId : selectedSession;
 
-  const visibleTransactions = useMemo(
-    () => filterTransactions(transactions, apiOnlyFilter),
-    [transactions, apiOnlyFilter],
+  const visibleTransactions = useMemo(() => {
+    const q = trafficSearch.trim().toLowerCase();
+    const source = q
+      ? transactions.filter(
+          (t) =>
+            t.url.toLowerCase().includes(q) ||
+            t.path.toLowerCase().includes(q) ||
+            t.method.toLowerCase().includes(q),
+        )
+      : apiOnlyFilter
+        ? (() => {
+            const apiRows = filterTransactions(transactions, true);
+            if (!apiRows.length && transactions.length) return transactions;
+            return apiRows;
+          })()
+        : transactions;
+    return source;
+  }, [transactions, apiOnlyFilter, trafficSearch]);
+
+  const apiMatchCount = useMemo(
+    () => filterTransactions(transactions, true).length,
+    [transactions],
   );
+  const showingAllDespiteApiFilter =
+    apiOnlyFilter &&
+    !trafficSearch.trim() &&
+    transactions.length > 0 &&
+    apiMatchCount === 0;
+
+  const emptyListState = useMemo(() => {
+    if (visibleTransactions.length > 0) return null;
+    const q = trafficSearch.trim();
+    if (q) {
+      return {
+        title: "无匹配流量",
+        hint: `没有包含「${q}」的记录。可清空搜索，或关闭「仅 API」查看全部 ${transactions.length} 条。`,
+        action: "clearSearch" as const,
+      };
+    }
+    if (capturing) {
+      return {
+        title: "等待流量",
+        hint: "用 Chrome 访问目标站点（HTTPS 需已安装证书并重开浏览器）。列表约每 2 秒刷新。",
+        action: null,
+      };
+    }
+    if (!activeSessionId) {
+      return {
+        title: "暂无抓包记录",
+        hint: "点击「开始抓包」后访问网页，或从历史会话下拉框选择已有会话。",
+        action: null,
+      };
+    }
+    return {
+      title: "本会话暂无记录",
+      hint: "该会话未写入流量，或已被「清空列表」。可重新开始抓包。",
+      action: null,
+    };
+  }, [
+    visibleTransactions.length,
+    trafficSearch,
+    transactions.length,
+    apiOnlyFilter,
+    apiMatchCount,
+    capturing,
+    activeSessionId,
+  ]);
 
   const txPageCount = Math.max(1, Math.ceil(visibleTransactions.length / TX_PAGE_SIZE) || 1);
   const pagedTransactions = useMemo(() => {
@@ -69,9 +155,6 @@ export default function CapturePanel({ projects, project, onProject }: Props) {
     });
   }, [project]);
 
-  const activeSessionId =
-    ingest.running && ingest.sessionId ? ingest.sessionId : selectedSession;
-
   useEffect(() => {
     setTxPage(1);
   }, [activeSessionId, apiOnlyFilter]);
@@ -80,15 +163,23 @@ export default function CapturePanel({ projects, project, onProject }: Props) {
     if (txPage > txPageCount) setTxPage(txPageCount);
   }, [txPage, txPageCount]);
 
-  const refreshIndex = useCallback(async () => {
-    const sid = ingest.running && ingest.sessionId ? ingest.sessionId : selectedSession;
-    if (!project || !sid) {
-      setTransactions([]);
-      return;
-    }
-    const { transactions: txs } = await window.atp.getCaptureIndex(project, sid);
-    setTransactions(txs);
-  }, [project, selectedSession, ingest.running, ingest.sessionId]);
+  const refreshIndex = useCallback(
+    async (opts?: { silent?: boolean }) => {
+      const sid = ingest.running && ingest.sessionId ? ingest.sessionId : selectedSession;
+      if (!project || !sid) {
+        setTransactions([]);
+        return;
+      }
+      if (!opts?.silent) setTrafficLoading(true);
+      try {
+        const { transactions: txs } = await window.atp.getCaptureIndex(project, sid);
+        setTransactions(txs);
+      } finally {
+        if (!opts?.silent) setTrafficLoading(false);
+      }
+    },
+    [project, selectedSession, ingest.running, ingest.sessionId],
+  );
 
   useEffect(() => {
     setSelectedSession("");
@@ -108,7 +199,7 @@ export default function CapturePanel({ projects, project, onProject }: Props) {
       setIngest(st);
       setMitm(await window.atp.mitmStatus());
       setSysProxy(await window.atp.systemProxyStatus());
-      if (st.running || selectedSession) await refreshIndex();
+      if (st.running || selectedSession) await refreshIndex({ silent: true });
     };
     void tick();
     const id = setInterval(() => void tick(), 2000);
@@ -185,10 +276,15 @@ export default function CapturePanel({ projects, project, onProject }: Props) {
   const openTx = async (txId: string) => {
     const sid = activeSessionId;
     if (!sid) return;
-    const tx = await window.atp.getCaptureTransaction(project, sid, txId);
-    setSelectedTx(tx);
-    setDraftYaml(tx ? transactionToCaseDraft(tx) : "");
-    setDraftCurl(tx ? transactionToCurl(tx) : "");
+    setTxDetailLoading(true);
+    try {
+      const tx = await window.atp.getCaptureTransaction(project, sid, txId);
+      setSelectedTx(tx);
+      setDraftYaml(tx ? captureTxToCaseYaml(tx) : "");
+      setDraftCurl(tx ? transactionToCurl(tx) : "");
+    } finally {
+      setTxDetailLoading(false);
+    }
   };
 
   const showDetailToast = (text: string) => {
@@ -241,21 +337,26 @@ export default function CapturePanel({ projects, project, onProject }: Props) {
     await refreshIndex();
   };
 
-  const runDeleteSession = async () => {
-    const sid = activeSessionId;
-    if (!project || !sid) return;
+  const runDeleteSessions = async (sessionIds: string[]) => {
+    if (!project || !sessionIds.length) return;
     setBusy(true);
-    const res = await window.atp.deleteCaptureSession(project, sid);
+    const res = await window.atp.deleteCaptureSessions(project, sessionIds);
     setBusy(false);
-    if (!res.ok) {
-      showDetailToast(res.error ?? "删除失败");
-      return;
+    if (res.deleted.length) {
+      setSelectedTx(null);
+      setDraftYaml("");
+      setDraftCurl("");
+      if (sessionIds.some((id) => id === selectedSession || id === activeSessionId)) {
+        setSelectedSession("");
+      }
     }
-    setSelectedTx(null);
-    setDraftYaml("");
-    setDraftCurl("");
-    setSelectedSession("");
-    showDetailToast("已删除会话");
+    setSessionsDeleteOpen(false);
+    if (res.failed.length) {
+      const msg = res.failed.map((f) => `${f.id.slice(0, 12)}…: ${f.error}`).join("；");
+      showDetailToast(`已删 ${res.deleted.length} 个；失败 ${res.failed.length}：${msg}`);
+    } else {
+      showDetailToast(`已删除 ${res.deleted.length} 个会话`);
+    }
     await refreshSessions();
     await refreshIndex();
   };
@@ -270,15 +371,9 @@ export default function CapturePanel({ projects, project, onProject }: Props) {
     });
   };
 
-  const onDeleteSession = () => {
-    if (!project || !activeSessionId) return;
-    setPendingConfirm({
-      title: "删除会话",
-      message: "将删除整个抓包会话目录，不可恢复。若正在抓包，请先停止。",
-      confirmLabel: "删除",
-      danger: true,
-      run: () => void runDeleteSession(),
-    });
+  const onDeleteSessions = () => {
+    if (!project || !sessions.length) return;
+    setSessionsDeleteOpen(true);
   };
 
   return (
@@ -288,12 +383,16 @@ export default function CapturePanel({ projects, project, onProject }: Props) {
       <section className="card">
         <h3 className="card-title">控制</h3>
         <div className="toolbar">
-          <select value={project} onChange={(e) => onProject(e.target.value)}>
-            {projects.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.name}
-              </option>
-            ))}
+          <select value={project || ""} disabled={!projects.length} onChange={(e) => onProject(e.target.value)}>
+            {!projects.length ? (
+              <option value="">暂无项目 — 请先到「项目与用例」新建</option>
+            ) : (
+              projects.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name}
+                </option>
+              ))
+            )}
           </select>
           <input
             className="text-input"
@@ -357,8 +456,9 @@ export default function CapturePanel({ projects, project, onProject }: Props) {
         )}
         {capturing && (
           <p className="hint">
-            浏览器：Chrome 访问即可。南财等<strong>桌面终端</strong>：开始抓包后需
-            <strong>完全退出并重启终端</strong>（已同步 WinHTTP+系统代理）。HTTPS 必须先装证书；若仍无流量，终端可能不走代理或证书锁定。
+            浏览器：Chrome 访问即可（需先<strong>安装证书</strong>并重开浏览器）。课程/H5 页（如小鹅通）接口常在{" "}
+            <code>*.xeknow.com</code> 等<strong>第三方域名</strong>：流量列表可关闭「仅 API」或搜索{" "}
+            <code>xeknow</code> / <code>shanxiguandian</code>。南财等桌面终端须完全退出后重启。
           </p>
         )}
       </section>
@@ -369,12 +469,33 @@ export default function CapturePanel({ projects, project, onProject }: Props) {
             流量列表
             {activeSessionId && (
               <span className="hint" style={{ fontWeight: 400, marginLeft: 8 }}>
-                {apiOnlyFilter && transactions.length !== visibleTransactions.length
-                  ? `API ${visibleTransactions.length} / 全部 ${transactions.length}`
-                  : `${transactions.length} 条`}
+                {trafficSearch.trim()
+                  ? `筛选 ${visibleTransactions.length} / 全部 ${transactions.length}`
+                  : apiOnlyFilter && apiMatchCount !== transactions.length && !showingAllDespiteApiFilter
+                    ? `API ${apiMatchCount} / 全部 ${transactions.length}`
+                    : showingAllDespiteApiFilter
+                      ? `全部 ${transactions.length} 条（未识别为 API，已全部显示）`
+                      : `${transactions.length} 条`}
               </span>
             )}
           </h3>
+          <label className="check-label capture-api-only">
+            <input
+              type="checkbox"
+              checked={apiOnlyFilter}
+              onChange={(e) => setApiOnlyFilter(e.target.checked)}
+            />
+            仅 API
+          </label>
+          <input
+            className="text-input capture-traffic-search"
+            placeholder="搜索 URL / 域名"
+            value={trafficSearch}
+            onChange={(e) => {
+              setTrafficSearch(e.target.value);
+              setTxPage(1);
+            }}
+          />
           {sessions.length > 0 && !capturing && (
             <select
               className="session-select"
@@ -407,23 +528,25 @@ export default function CapturePanel({ projects, project, onProject }: Props) {
           <button
             type="button"
             className="nav-btn"
-            disabled={busy || !activeSessionId || capturing}
-            title="删除整个会话目录"
-            onClick={() => void onDeleteSession()}
+            disabled={busy || !sessions.length}
+            title="勾选并删除多个历史会话"
+            onClick={() => onDeleteSessions()}
           >
-            删除会话
+            删除会话…
           </button>
         </div>
-        <table>
-          <thead>
-            <tr>
-              <th>时间</th>
-              <th>方法</th>
-              <th>Path</th>
-              <th>URL</th>
-            </tr>
-          </thead>
-          <tbody>
+        <div className="loading-host capture-traffic-table-host">
+          <LoadingOverlay show={trafficLoading} label="加载流量…" />
+          <table>
+            <thead>
+              <tr>
+                <th>时间</th>
+                <th>方法</th>
+                <th>Path</th>
+                <th>URL</th>
+              </tr>
+            </thead>
+            <tbody>
             {pagedTransactions.map((t) => (
               <tr key={t.id} className="clickable" onClick={() => void openTx(t.id)}>
                 <td>{t.captured_at}</td>
@@ -432,17 +555,40 @@ export default function CapturePanel({ projects, project, onProject }: Props) {
                 <td className="url-cell">{t.url}</td>
               </tr>
             ))}
-            {!visibleTransactions.length && (
-              <tr>
-                <td colSpan={4} className="muted-cell">
-                  {transactions.length && apiOnlyFilter
-                    ? "当前无 API 记录（已自动隐藏图片）；请在抓包过程中访问业务接口"
-                    : "暂无记录；开始抓包后用 Chrome 访问站点"}
+            {!visibleTransactions.length && emptyListState && (
+              <tr className="capture-empty-row">
+                <td colSpan={4}>
+                  <div className="capture-empty-state">
+                    <div className="capture-empty-icon" aria-hidden>
+                      ∅
+                    </div>
+                    <p className="capture-empty-title">{emptyListState.title}</p>
+                    <p className="capture-empty-hint">{emptyListState.hint}</p>
+                    {emptyListState.action === "clearSearch" && (
+                      <button
+                        type="button"
+                        className="nav-btn"
+                        onClick={() => setTrafficSearch("")}
+                      >
+                        清空搜索
+                      </button>
+                    )}
+                    {emptyListState.action === "showAll" && (
+                      <button
+                        type="button"
+                        className="nav-btn"
+                        onClick={() => setApiOnlyFilter(false)}
+                      >
+                        显示全部流量
+                      </button>
+                    )}
+                  </div>
                 </td>
               </tr>
             )}
-          </tbody>
-        </table>
+            </tbody>
+          </table>
+        </div>
         {visibleTransactions.length > TX_PAGE_SIZE && (
           <div className="pagination">
             <button
@@ -469,7 +615,8 @@ export default function CapturePanel({ projects, project, onProject }: Props) {
       </section>
 
       {selectedTx && (
-        <section className="card">
+        <section className="card loading-host">
+          <LoadingOverlay show={txDetailLoading} label="加载明细…" />
           <div className="toolbar" style={{ marginBottom: 8 }}>
             <h3 className="card-title" style={{ margin: 0, flex: 1 }}>
               交易明细
@@ -480,6 +627,20 @@ export default function CapturePanel({ projects, project, onProject }: Props) {
             <button type="button" className="nav-btn" onClick={() => downloadCurl()}>
               下载脚本
             </button>
+            {onOpenInWorkbench && selectedTx && (
+              <button
+                type="button"
+                className="primary"
+                onClick={() => onOpenInWorkbench(captureTxToDraft(selectedTx))}
+              >
+                在工作台打开
+              </button>
+            )}
+            {selectedTx && (
+              <button type="button" className="nav-btn" onClick={() => setSaveCaseOpen(true)}>
+                保存为用例
+              </button>
+            )}
           </div>
           <pre className="curl-block">{draftCurl}</pre>
           <div className="grid-2" style={{ marginTop: 12 }}>
@@ -500,6 +661,59 @@ export default function CapturePanel({ projects, project, onProject }: Props) {
         </div>
       )}
 
+      <SaveCaseDialog
+        open={saveCaseOpen && !!selectedTx}
+        defaultName={selectedTx ? captureTxToCaseMeta(selectedTx).defaultName : "captured-case"}
+        yamlPreview={draftYaml}
+        onCancel={() => setSaveCaseOpen(false)}
+        onConfirm={({ caseName, addToSuite, suiteName }) => {
+          void (async () => {
+            if (!project || !draftYaml) return;
+            const exists = await window.atp.projectCaseExists(project, caseName);
+            setSaveCaseOpen(false);
+            if (exists) {
+              setPendingCaseOverwrite({ caseName, addToSuite, suiteName, yaml: draftYaml });
+              return;
+            }
+            const res = await window.atp.saveProjectCase(project, caseName, draftYaml, {
+              addToSuite: addToSuite ? suiteName : undefined,
+            });
+            if (!res.ok) {
+              showDetailToast(res.error ?? "保存失败");
+              return;
+            }
+            showDetailToast(`已保存 ${res.relativePath}`);
+            onCaseSaved?.();
+          })();
+        }}
+      />
+
+      <ConfirmDialog
+        open={pendingCaseOverwrite !== null}
+        title="覆盖用例"
+        message={`cases/${pendingCaseOverwrite?.caseName ?? ""}.yaml 已存在，是否覆盖？`}
+        confirmLabel="覆盖"
+        danger
+        onCancel={() => setPendingCaseOverwrite(null)}
+        onConfirm={() => {
+          const pending = pendingCaseOverwrite;
+          setPendingCaseOverwrite(null);
+          if (!pending || !project) return;
+          void (async () => {
+            const res = await window.atp.saveProjectCase(project, pending.caseName, pending.yaml, {
+              addToSuite: pending.addToSuite ? pending.suiteName : undefined,
+              overwrite: true,
+            });
+            if (!res.ok) {
+              showDetailToast(res.error ?? "覆盖失败");
+              return;
+            }
+            showDetailToast(`已覆盖 ${res.relativePath}`);
+            onCaseSaved?.();
+          })();
+        }}
+      />
+
       <ConfirmDialog
         open={pendingConfirm !== null}
         title={pendingConfirm?.title ?? ""}
@@ -513,6 +727,18 @@ export default function CapturePanel({ projects, project, onProject }: Props) {
           void action?.();
         }}
       />
+
+      <CaptureSessionsDialog
+        open={sessionsDeleteOpen}
+        sessions={sessions}
+        lockedSessionId={lockedCaptureSessionId}
+        initialSelected={
+          activeSessionId && activeSessionId !== lockedCaptureSessionId ? [activeSessionId] : []
+        }
+        busy={busy}
+        onCancel={() => setSessionsDeleteOpen(false)}
+        onConfirm={(ids) => void runDeleteSessions(ids)}
+      />
     </>
   );
 }
@@ -522,33 +748,6 @@ function DraftYaml({ draft }: { draft: string }) {
     <div>
       <h4 className="sub-title">用例草案（YAML）</h4>
       <pre>{draft}</pre>
-      <p className="hint">复制到 projects/…/cases/ 后按需改断言与变量。</p>
     </div>
   );
-}
-
-function transactionToCaseDraft(tx: unknown): string {
-  const t = tx as {
-    request?: { method?: string; url?: string; headers?: Record<string, string>; body?: unknown };
-  };
-  const method = t.request?.method ?? "GET";
-  const url = t.request?.url ?? "";
-  const lines = [
-    "name: captured-case",
-    "description: 由抓包生成，请检查变量与断言",
-    "request:",
-    `  method: ${method}`,
-    `  url: "${url.replace(/"/g, '\\"')}"`,
-  ];
-  if (t.request?.headers && Object.keys(t.request.headers).length) {
-    lines.push("  headers:");
-    for (const [k, v] of Object.entries(t.request.headers)) {
-      lines.push(`    ${k}: "${String(v).replace(/"/g, '\\"')}"`);
-    }
-  }
-  if (t.request?.body !== undefined) {
-    lines.push(`  body: ${JSON.stringify(t.request.body)}`);
-  }
-  lines.push("assertions:", "  - type: status", "    equals: 200");
-  return lines.join("\n");
 }

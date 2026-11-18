@@ -286,6 +286,24 @@ export async function deleteCaptureSession(
   }
 }
 
+export async function deleteCaptureSessions(
+  project: string,
+  sessionIds: string[],
+): Promise<{
+  ok: boolean;
+  deleted: string[];
+  failed: Array<{ id: string; error: string }>;
+}> {
+  const deleted: string[] = [];
+  const failed: Array<{ id: string; error: string }> = [];
+  for (const sessionId of [...new Set(sessionIds)]) {
+    const res = await deleteCaptureSession(project, sessionId);
+    if (res.ok) deleted.push(sessionId);
+    else failed.push({ id: sessionId, error: res.error ?? "删除失败" });
+  }
+  return { ok: failed.length === 0, deleted, failed };
+}
+
 export async function getCaptureIndex(
   project: string,
   sessionId: string,

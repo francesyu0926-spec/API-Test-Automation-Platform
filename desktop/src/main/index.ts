@@ -9,7 +9,22 @@ import * as capture from "./captureService";
 import { restartChromeForTrustStore } from "./chromeRestart";
 import * as mitmCert from "./mitmCert";
 import { runCaptureDiagnostics } from "./captureDiagnostics";
+import * as caseStore from "./caseStore";
+import * as envStore from "./envStore";
+import * as projectStore from "./projectStore";
+import * as collections from "./collectionStore";
+import { cancelHttpBenchmark, runHttpBenchmark } from "./httpBenchmark";
+import { sendHttpRequest } from "./httpRequest";
+import * as wsSession from "./wsSession";
+import type { WsConnectPayload, WsSendPayload } from "../shared/apiWorkbenchTypes";
+import * as perfReports from "./perfReportStore";
 import { setRepoRoot } from "./repo";
+import type {
+  ApiCollectionFile,
+  HttpBenchmarkOptions,
+  HttpBenchmarkReport,
+  HttpSendPayload,
+} from "../shared/apiWorkbenchTypes";
 
 function createWindow(): void {
   const win = new BrowserWindow({
@@ -54,6 +69,7 @@ app.on("window-all-closed", () => {
 });
 
 app.on("before-quit", () => {
+  wsSession.wsCloseAll();
   capture.stopIngestOnQuit();
 });
 
@@ -66,6 +82,34 @@ ipcMain.handle("atp:listProjects", () => atp.listProjects());
 ipcMain.handle("atp:listProjectAssets", (_e, projectId: string) =>
   atp.listProjectAssets(projectId),
 );
+ipcMain.handle("atp:getProjectVariables", (_e, projectId: string, envName: string) =>
+  atp.getProjectVariables(projectId, envName),
+);
+ipcMain.handle(
+  "atp:saveProjectEnvLocal",
+  (_e, projectId: string, envName: string, variables: Record<string, string>) =>
+    envStore.saveProjectEnvLocal(projectId, envName, variables),
+);
+ipcMain.handle(
+  "atp:createProjectEnvironment",
+  (
+    _e,
+    projectId: string,
+    envName: string,
+    opts?: { copyFrom?: string; baseUrl?: string },
+  ) => envStore.createProjectEnvironment(projectId, envName, opts),
+);
+ipcMain.handle(
+  "atp:createProject",
+  (_e, opts: { id: string; name?: string; baseUrl?: string }) => projectStore.createProject(opts),
+);
+ipcMain.handle("atp:deleteProject", (_e, projectId: string) => {
+  const ingest = capture.getIngestStatus();
+  if (ingest.running && ingest.project === projectId) {
+    return Promise.resolve({ ok: false, error: "该项目正在抓包，请先停止抓包再删除。" });
+  }
+  return projectStore.deleteProject(projectId);
+});
 ipcMain.handle("atp:readFile", (_e, relativePath: string) => atp.readTextFile(relativePath));
 ipcMain.handle("atp:listRuns", (_e, filter?: { project?: string; status?: string; limit?: number }) =>
   atp.listRuns(filter),
@@ -97,6 +141,9 @@ ipcMain.handle("atp:clearCaptureTransactions", (_e, project: string, sessionId: 
 );
 ipcMain.handle("atp:deleteCaptureSession", (_e, project: string, sessionId: string) =>
   capture.deleteCaptureSession(project, sessionId),
+);
+ipcMain.handle("atp:deleteCaptureSessions", (_e, project: string, sessionIds: string[]) =>
+  capture.deleteCaptureSessions(project, sessionIds),
 );
 ipcMain.handle("atp:getIngestStatus", () => capture.getIngestStatus());
 ipcMain.handle("atp:getCaptureIndex", (_e, project: string, sessionId: string) =>
@@ -149,3 +196,61 @@ ipcMain.handle("atp:copyChromeRestart", () => {
 ipcMain.handle("atp:openMitmIt", () => mitmCert.openMitmItCertPage());
 ipcMain.handle("atp:stopAllCapture", (_e, closeSession: boolean) => capture.stopAllCapture(closeSession));
 ipcMain.handle("atp:restoreNetworkOnly", () => capture.restoreNetworkOnly());
+
+ipcMain.handle("atp:listCollections", (_e, projectId: string) => collections.listCollections(projectId));
+ipcMain.handle("atp:getCollection", (_e, projectId: string, collectionId: string) =>
+  collections.getCollection(projectId, collectionId),
+);
+ipcMain.handle("atp:saveCollection", (_e, projectId: string, collection: ApiCollectionFile) =>
+  collections.saveCollection(projectId, collection),
+);
+ipcMain.handle("atp:ensureCollection", (_e, projectId: string, collectionId: string) =>
+  collections.ensureCollection(projectId, collectionId),
+);
+ipcMain.handle("atp:deleteCollection", (_e, projectId: string, collectionId: string) =>
+  collections.deleteCollection(projectId, collectionId),
+);
+ipcMain.handle("atp:sendHttpRequest", (_e, payload: HttpSendPayload) => sendHttpRequest(payload));
+ipcMain.handle("atp:wsConnect", (e, payload: WsConnectPayload) =>
+  wsSession.wsConnect(payload, e.sender),
+);
+ipcMain.handle("atp:wsSend", (_e, payload: WsSendPayload) => wsSession.wsSend(payload));
+ipcMain.handle("atp:wsClose", (_e, connectionId: string) => wsSession.wsClose(connectionId));
+ipcMain.handle(
+  "atp:runHttpBenchmark",
+  (
+    _e,
+    payload: HttpSendPayload,
+    options: HttpBenchmarkOptions,
+    meta?: { name?: string },
+  ) => runHttpBenchmark(payload, options, meta),
+);
+ipcMain.handle("atp:cancelHttpBenchmark", () => {
+  cancelHttpBenchmark();
+  return { ok: true };
+});
+ipcMain.handle("atp:savePerfReport", (_e, projectId: string, report: HttpBenchmarkReport) =>
+  perfReports.savePerfReport(projectId, report),
+);
+ipcMain.handle("atp:listPerfReports", (_e, projectId: string, limit?: number) =>
+  perfReports.listPerfReports(projectId, limit),
+);
+ipcMain.handle(
+  "atp:saveProjectCase",
+  (
+    _e,
+    projectId: string,
+    caseName: string,
+    yamlContent: string,
+    options?: { addToSuite?: string; overwrite?: boolean },
+  ) => caseStore.saveProjectCase(projectId, caseName, yamlContent, options),
+);
+ipcMain.handle("atp:updateProjectCase", (_e, projectId: string, caseName: string, yamlContent: string) =>
+  caseStore.updateProjectCase(projectId, caseName, yamlContent),
+);
+ipcMain.handle("atp:projectCaseExists", (_e, projectId: string, caseName: string) =>
+  caseStore.projectCaseExists(projectId, caseName),
+);
+ipcMain.handle("atp:deleteProjectCase", (_e, projectId: string, caseName: string) =>
+  caseStore.deleteProjectCase(projectId, caseName),
+);

@@ -163,3 +163,25 @@ export async function getWorkspaceInfo(): Promise<{ repoRoot: string; python: st
   const repoRoot = getRepoRoot();
   return { repoRoot, python: pythonExecutable(repoRoot) };
 }
+
+export async function getProjectVariables(
+  projectId: string,
+  envName: string,
+): Promise<Record<string, string>> {
+  const envDir = path.join(getRepoRoot(), "projects", projectId, "environments");
+  const basePath = path.join(envDir, `${envName}.yaml`);
+  const localPath = path.join(envDir, `${envName}.local.yaml`);
+  const variables: Record<string, string> = { project: projectId };
+  for (const filePath of [basePath, localPath]) {
+    try {
+      const text = await fs.readFile(filePath, "utf8");
+      const doc = yaml.load(text) as { variables?: Record<string, unknown> };
+      for (const [k, v] of Object.entries(doc.variables ?? {})) {
+        variables[String(k)] = String(v);
+      }
+    } catch {
+      // missing env file
+    }
+  }
+  return variables;
+}

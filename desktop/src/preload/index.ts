@@ -1,5 +1,16 @@
 import { contextBridge, ipcRenderer } from "electron";
 
+import type {
+  ApiCollectionFile,
+  HttpBenchmarkOptions,
+  HttpBenchmarkReport,
+  HttpSendPayload,
+  HttpSendResult,
+  WsConnectPayload,
+  WsEvent,
+  WsSendPayload,
+} from "../shared/apiWorkbenchTypes";
+
 export type CaptureSessionRow = {
   id: string;
   project: string;
@@ -35,6 +46,23 @@ export type AtpApi = {
     suites: string[];
     cases: string[];
   }>;
+  getProjectVariables: (projectId: string, envName: string) => Promise<Record<string, string>>;
+  saveProjectEnvLocal: (
+    projectId: string,
+    envName: string,
+    variables: Record<string, string>,
+  ) => Promise<{ ok: boolean; relativePath: string }>;
+  createProjectEnvironment: (
+    projectId: string,
+    envName: string,
+    opts?: { copyFrom?: string; baseUrl?: string },
+  ) => Promise<{ ok: boolean; error?: string; envName?: string }>;
+  createProject: (opts: {
+    id: string;
+    name?: string;
+    baseUrl?: string;
+  }) => Promise<{ ok: boolean; error?: string; projectId?: string }>;
+  deleteProject: (projectId: string) => Promise<{ ok: boolean; error?: string }>;
   readFile: (relativePath: string) => Promise<string | null>;
   listRuns: (filter?: { project?: string; status?: string; limit?: number }) => Promise<
     Array<{
@@ -68,6 +96,14 @@ export type AtpApi = {
     sessionId: string,
   ) => Promise<{ ok: boolean; error?: string; removed?: number }>;
   deleteCaptureSession: (project: string, sessionId: string) => Promise<{ ok: boolean; error?: string }>;
+  deleteCaptureSessions: (
+    project: string,
+    sessionIds: string[],
+  ) => Promise<{
+    ok: boolean;
+    deleted: string[];
+    failed: Array<{ id: string; error: string }>;
+  }>;
   getIngestStatus: () => Promise<{
     running: boolean;
     project?: string;
@@ -123,6 +159,45 @@ export type AtpApi = {
   openMitmIt: () => Promise<void>;
   stopAllCapture: (closeSession: boolean) => Promise<{ message: string }>;
   restoreNetworkOnly: () => Promise<{ message: string }>;
+  listCollections: (projectId: string) => Promise<
+    Array<{ id: string; name: string; requestCount: number }>
+  >;
+  getCollection: (projectId: string, collectionId: string) => Promise<ApiCollectionFile | null>;
+  saveCollection: (projectId: string, collection: ApiCollectionFile) => Promise<{ ok: boolean }>;
+  ensureCollection: (projectId: string, collectionId: string) => Promise<ApiCollectionFile>;
+  deleteCollection: (
+    projectId: string,
+    collectionId: string,
+  ) => Promise<{ ok: boolean; error?: string; recreatedDefault?: boolean }>;
+  sendHttpRequest: (payload: HttpSendPayload) => Promise<HttpSendResult>;
+  wsConnect: (payload: WsConnectPayload) => Promise<{ ok: boolean; error?: string }>;
+  wsSend: (payload: WsSendPayload) => Promise<{ ok: boolean; error?: string }>;
+  wsClose: (connectionId: string) => Promise<{ ok: boolean }>;
+  onWsEvent: (handler: (ev: WsEvent) => void) => () => void;
+  runHttpBenchmark: (
+    payload: HttpSendPayload,
+    options: HttpBenchmarkOptions,
+    meta?: { name?: string },
+  ) => Promise<HttpBenchmarkReport>;
+  cancelHttpBenchmark: () => Promise<{ ok: boolean }>;
+  savePerfReport: (projectId: string, report: HttpBenchmarkReport) => Promise<{ ok: boolean; relativePath: string }>;
+  listPerfReports: (
+    projectId: string,
+    limit?: number,
+  ) => Promise<Array<{ id: string; file: string; startedAt: string; method: string; url: string }>>;
+  saveProjectCase: (
+    projectId: string,
+    caseName: string,
+    yamlContent: string,
+    options?: { addToSuite?: string; overwrite?: boolean },
+  ) => Promise<{ ok: boolean; error?: string; relativePath?: string; caseName?: string; exists?: boolean }>;
+  projectCaseExists: (projectId: string, caseName: string) => Promise<boolean>;
+  updateProjectCase: (
+    projectId: string,
+    caseName: string,
+    yamlContent: string,
+  ) => Promise<{ ok: boolean; error?: string; relativePath?: string }>;
+  deleteProjectCase: (projectId: string, caseName: string) => Promise<{ ok: boolean; error?: string }>;
 };
 
 const api: AtpApi = {
@@ -130,6 +205,14 @@ const api: AtpApi = {
   setRepoRoot: (root) => ipcRenderer.invoke("atp:setRepoRoot", root),
   listProjects: () => ipcRenderer.invoke("atp:listProjects"),
   listProjectAssets: (projectId) => ipcRenderer.invoke("atp:listProjectAssets", projectId),
+  getProjectVariables: (projectId, envName) =>
+    ipcRenderer.invoke("atp:getProjectVariables", projectId, envName),
+  saveProjectEnvLocal: (projectId, envName, variables) =>
+    ipcRenderer.invoke("atp:saveProjectEnvLocal", projectId, envName, variables),
+  createProjectEnvironment: (projectId, envName, opts) =>
+    ipcRenderer.invoke("atp:createProjectEnvironment", projectId, envName, opts),
+  createProject: (opts) => ipcRenderer.invoke("atp:createProject", opts),
+  deleteProject: (projectId) => ipcRenderer.invoke("atp:deleteProject", projectId),
   readFile: (relativePath) => ipcRenderer.invoke("atp:readFile", relativePath),
   listRuns: (filter) => ipcRenderer.invoke("atp:listRuns", filter),
   getRunDetail: (runId) => ipcRenderer.invoke("atp:getRunDetail", runId),
@@ -145,6 +228,8 @@ const api: AtpApi = {
     ipcRenderer.invoke("atp:clearCaptureTransactions", project, sessionId),
   deleteCaptureSession: (project, sessionId) =>
     ipcRenderer.invoke("atp:deleteCaptureSession", project, sessionId),
+  deleteCaptureSessions: (project, sessionIds) =>
+    ipcRenderer.invoke("atp:deleteCaptureSessions", project, sessionIds),
   getIngestStatus: () => ipcRenderer.invoke("atp:getIngestStatus"),
   getCaptureIndex: (project, sessionId) => ipcRenderer.invoke("atp:getCaptureIndex", project, sessionId),
   getCaptureTransaction: (project, sessionId, txId) =>
@@ -164,6 +249,33 @@ const api: AtpApi = {
   openMitmIt: () => ipcRenderer.invoke("atp:openMitmIt"),
   stopAllCapture: (closeSession) => ipcRenderer.invoke("atp:stopAllCapture", closeSession),
   restoreNetworkOnly: () => ipcRenderer.invoke("atp:restoreNetworkOnly"),
+  listCollections: (projectId) => ipcRenderer.invoke("atp:listCollections", projectId),
+  getCollection: (projectId, collectionId) => ipcRenderer.invoke("atp:getCollection", projectId, collectionId),
+  saveCollection: (projectId, collection) => ipcRenderer.invoke("atp:saveCollection", projectId, collection),
+  ensureCollection: (projectId, collectionId) =>
+    ipcRenderer.invoke("atp:ensureCollection", projectId, collectionId),
+  deleteCollection: (projectId, collectionId) =>
+    ipcRenderer.invoke("atp:deleteCollection", projectId, collectionId),
+  sendHttpRequest: (payload) => ipcRenderer.invoke("atp:sendHttpRequest", payload),
+  wsConnect: (payload) => ipcRenderer.invoke("atp:wsConnect", payload),
+  wsSend: (payload) => ipcRenderer.invoke("atp:wsSend", payload),
+  wsClose: (connectionId) => ipcRenderer.invoke("atp:wsClose", connectionId),
+  onWsEvent: (handler) => {
+    const listener = (_: unknown, ev: WsEvent) => handler(ev);
+    ipcRenderer.on("atp:wsEvent", listener);
+    return () => ipcRenderer.removeListener("atp:wsEvent", listener);
+  },
+  runHttpBenchmark: (payload, options, meta) =>
+    ipcRenderer.invoke("atp:runHttpBenchmark", payload, options, meta),
+  cancelHttpBenchmark: () => ipcRenderer.invoke("atp:cancelHttpBenchmark"),
+  savePerfReport: (projectId, report) => ipcRenderer.invoke("atp:savePerfReport", projectId, report),
+  listPerfReports: (projectId, limit) => ipcRenderer.invoke("atp:listPerfReports", projectId, limit),
+  saveProjectCase: (projectId, caseName, yamlContent, options) =>
+    ipcRenderer.invoke("atp:saveProjectCase", projectId, caseName, yamlContent, options),
+  projectCaseExists: (projectId, caseName) => ipcRenderer.invoke("atp:projectCaseExists", projectId, caseName),
+  updateProjectCase: (projectId, caseName, yamlContent) =>
+    ipcRenderer.invoke("atp:updateProjectCase", projectId, caseName, yamlContent),
+  deleteProjectCase: (projectId, caseName) => ipcRenderer.invoke("atp:deleteProjectCase", projectId, caseName),
 };
 
 contextBridge.exposeInMainWorld("atp", api);

@@ -83,36 +83,63 @@ def _post(payload: dict[str, Any]) -> None:
         ctx.log.warn(f"ingest failed ({INGEST_URL}): {e}")
 
 
+def _ingest_flow(flow: http.HTTPFlow, *, ws_payload: dict[str, Any] | None = None) -> None:
+    if flow.request.method == "CONNECT":
+        return
+    url = flow.request.pretty_url
+    if not _host_allowed(url):
+        return
+
+    req_content = flow.request.get_content()
+    resp_content = flow.response.get_content() if flow.response else None
+    payload = {
+        "tags": ["mitmproxy"],
+        "request": {
+            "method": flow.request.method,
+            "url": url,
+            "headers": _headers(flow.request.headers),
+            "body": _decode_body(req_content),
+        },
+        "response": {
+            "status": flow.response.status_code if flow.response else 0,
+            "headers": _headers(flow.response.headers) if flow.response else {},
+            "body": _decode_body(resp_content),
+            "duration_ms": (flow.response.timestamp_end - flow.request.timestamp_start) * 1000
+            if flow.response and flow.response.timestamp_end
+            else None,
+        },
+    }
+    if ws_payload:
+        payload["websocket"] = ws_payload
+    _post(payload)
+
+
 class ATPIngestAddon:
     def response(self, flow: http.HTTPFlow) -> None:
-        if flow.request.method == "CONNECT":
-            return
         if not flow.response:
             return
+        _ingest_flow(flow)
+
+    def websocket_message(self, flow: http.HTTPFlow) -> None:
         url = flow.request.pretty_url
         if not _host_allowed(url):
             return
-
-        req_content = flow.request.get_content()
-        resp_content = flow.response.get_content()
-        payload = {
-            "tags": ["mitmproxy"],
-            "request": {
-                "method": flow.request.method,
-                "url": url,
-                "headers": _headers(flow.request.headers),
-                "body": _decode_body(req_content),
+        msg = flow.websocket.messages[-1] if flow.websocket and flow.websocket.messages else None
+        if not msg:
+            return
+        body_preview = msg.content[:BODY_PREVIEW]
+        try:
+            body_text = body_preview.decode("utf-8")
+        except UnicodeDecodeError:
+            body_text = f"<binary {len(msg.content)} B>"
+        _ingest_flow(
+            flow,
+            ws_payload={
+                "from_client": msg.from_client,
+                "type": msg.type.name if hasattr(msg.type, "name") else str(msg.type),
+                "body": body_text,
             },
-            "response": {
-                "status": flow.response.status_code,
-                "headers": _headers(flow.response.headers),
-                "body": _decode_body(resp_content),
-                "duration_ms": (flow.response.timestamp_end - flow.request.timestamp_start) * 1000
-                if flow.response.timestamp_end
-                else None,
-            },
-        }
-        _post(payload)
+        )
 
 
 addons = [ATPIngestAddon()]
