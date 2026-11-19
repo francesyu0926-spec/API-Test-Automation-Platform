@@ -236,9 +236,12 @@ export default function JmeterJtlPanel({
 
       const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
       const repoPath = `projects/${project}/jmx/${baseName}-${stamp}.jmx`;
+      const jtlDir = filePath.replace(/^(.*)[\\/][^\\/]+$/, "$1").trim();
+      const suggestedJmxName = `${baseName}-${stamp}.jmx`;
+      const saveDefaultPath = jtlDir ? `${jtlDir}\\${suggestedJmxName}` : suggestedJmxName;
 
       const saveDialog = await window.atp.saveTextWithDialog({
-        defaultPath: `${baseName}.jmx`,
+        defaultPath: saveDefaultPath,
         content: built.xml,
         filters: [{ name: "JMeter 测试计划", extensions: ["jmx"] }],
       });

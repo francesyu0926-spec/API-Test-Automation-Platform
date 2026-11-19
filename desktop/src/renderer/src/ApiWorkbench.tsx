@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 
 import type { ApiCollectionFile, HttpSendResult, WsEvent, WorkbenchDraft } from "../../shared/apiWorkbenchTypes";
 import CaseSaveConflictDialog from "./CaseSaveConflictDialog";
@@ -44,6 +45,11 @@ import {
 } from "./jsonVisualExport";
 import { saveBytesWithDialog } from "./saveBytesWithDialog";
 import { WorkbenchGroupFolderIcon, WorkbenchSaveCollectionIcon } from "./workbenchMetaIcons";
+import WorkbenchTransportErrorCard from "./WorkbenchTransportErrorCard";
+import {
+  isWorkbenchTransportFailure,
+  parseWorkbenchTransportError,
+} from "./workbenchNetworkError";
 
 type Props = {
   project: string;
@@ -138,6 +144,9 @@ export default function ApiWorkbench({
   const [respJsonPretty, setRespJsonPretty] = useState(true);
   const [visualExportBusy, setVisualExportBusy] = useState(false);
   const [visualSelectedCount, setVisualSelectedCount] = useState(0);
+  const [visualExportMenuOpen, setVisualExportMenuOpen] = useState(false);
+  const [visualExportMenuPos, setVisualExportMenuPos] = useState({ top: 0, right: 0 });
+  const visualExportMenuBtnRef = useRef<HTMLButtonElement>(null);
   const jsonVisualRef = useRef<JsonResponseViewHandle>(null);
   const [respView, setRespView] = useState<"body" | "headers">("body");
   const [toast, setToast] = useState("");
@@ -159,6 +168,14 @@ export default function ApiWorkbench({
   const [wsLog, setWsLog] = useState<WsLogLine[]>([]);
   const [workbenchLoading, setWorkbenchLoading] = useState(false);
   const [draftImporting, setDraftImporting] = useState(false);
+  const INSECURE_TLS_KEY = "atp:workbenchInsecureTls";
+  const [ignoreTlsInsecure, setIgnoreTlsInsecure] = useState(() => {
+    try {
+      return sessionStorage.getItem(INSECURE_TLS_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
   const RESPONSE_HEIGHT_KEY = "atp:workbenchResponseH";
   const [responsePaneHeight, setResponsePaneHeight] = useState(() => {
     try {
@@ -184,9 +201,19 @@ export default function ApiWorkbench({
   const projectScopeRef = useRef(project);
   projectScopeRef.current = project;
 
-  const showToast = (text: string) => {
+  const showToast = (text: string, autoHideMs = 2600) => {
     setToast(text);
-    window.setTimeout(() => setToast(""), 2600);
+    window.setTimeout(() => setToast(""), autoHideMs);
+  };
+
+  const setInsecureTls = (next: boolean) => {
+    setIgnoreTlsInsecure(next);
+    try {
+      if (next) sessionStorage.setItem(INSECURE_TLS_KEY, "1");
+      else sessionStorage.removeItem(INSECURE_TLS_KEY);
+    } catch {
+      /* ignore */
+    }
   };
 
   const loadCollections = useCallback(async () => {
@@ -660,7 +687,10 @@ export default function ApiWorkbench({
     }
     try {
       const payload = resolveWorkbenchPayload(draft, activeVars);
-      const res = await window.atp.sendHttpRequest(payload);
+      const res = await window.atp.sendHttpRequest({
+        ...payload,
+        insecureTls: ignoreTlsInsecure || undefined,
+      });
       setResponse(res);
       if (shouldSuggestWsAfterHttp(res.status, payload.url, payload.method)) {
         setWsSwitchHint(true);
@@ -668,7 +698,9 @@ export default function ApiWorkbench({
       const loginHint = businessLoginHintFromBody(res.bodyText);
       if (loginHint) {
         openEnvConfig(loginHint, { markResendAfterSave: true });
-      } else if (res.error) showToast(res.error);
+      } else if (res.error && !isWorkbenchTransportFailure(res)) {
+        showToast(res.error, 3000);
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       if (msg.includes("未定义变量")) openEnvVariables({ sampler: draft });
@@ -682,7 +714,9 @@ export default function ApiWorkbench({
         bodySize: 0,
         error: msg,
       });
-      showToast(msg);
+      if (!/网络|TLS|证书|socket|超时|ENOTFOUND/i.test(msg)) {
+        showToast(msg, 3000);
+      }
     } finally {
       setSending(false);
     }
@@ -936,8 +970,21 @@ export default function ApiWorkbench({
 
   const responseJson = useMemo(() => {
     if (!response?.bodyText) return null;
+    if (isWorkbenchTransportFailure(response)) return null;
     return parseResponseJson(response.bodyText, responseContentType);
   }, [response, responseContentType]);
+
+  const transportErrorView = useMemo(() => {
+    if (!response || !isWorkbenchTransportFailure(response)) return null;
+    return parseWorkbenchTransportError(response.error ?? response.bodyText);
+  }, [response]);
+
+  const httpStatusChipLabel = useMemo(() => {
+    if (!response) return "";
+    if (transportErrorView) return transportErrorView.statusLabel;
+    const code = response.status || "—";
+    return `${code}${response.statusText ? ` ${response.statusText}` : ""}`;
+  }, [response, transportErrorView]);
 
   const responseBodyDisplay = useMemo(() => {
     if (!response) return "";
@@ -966,6 +1013,31 @@ export default function ApiWorkbench({
       return responseBodyDisplay;
     }
   }, [responseBodyDisplay, responseJson, respJsonPretty]);
+
+  useEffect(() => {
+    if (!visualExportMenuOpen) return;
+    const onDoc = (e: MouseEvent) => {
+      const t = e.target as Node;
+      if (visualExportMenuBtnRef.current?.contains(t)) return;
+      const panel = document.getElementById("workbench-visual-export-menu");
+      if (panel?.contains(t)) return;
+      setVisualExportMenuOpen(false);
+    };
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, [visualExportMenuOpen]);
+
+  const toggleVisualExportMenu = () => {
+    setVisualExportMenuOpen((open) => {
+      if (open) return false;
+      const btn = visualExportMenuBtnRef.current;
+      if (btn) {
+        const r = btn.getBoundingClientRect();
+        setVisualExportMenuPos({ top: r.bottom + 6, right: window.innerWidth - r.right });
+      }
+      return true;
+    });
+  };
 
   const copyResponseBody = useCallback(async () => {
     const text = responseRawCopyPayload;
@@ -1657,13 +1729,14 @@ export default function ApiWorkbench({
                 {protocol === "http" && response ? (
                   <div className="workbench-status-chips" role="group" aria-label="响应摘要">
                     <span
-                      className={`workbench-status-chip workbench-status-chip--code ${httpStatusTone(
-                        response.status,
-                        response.ok,
-                      )}`}
+                      className={`workbench-status-chip${
+                        transportErrorView
+                          ? " workbench-status-chip--meta workbench-status-chip--fail-text"
+                          : ` workbench-status-chip--code ${httpStatusTone(response.status, response.ok)}`
+                      }`}
                     >
-                      <span className="workbench-status-chip-dot" aria-hidden />
-                      {(response.status || "—") + (response.statusText ? ` ${response.statusText}` : "")}
+                      {!transportErrorView ? <span className="workbench-status-chip-dot" aria-hidden /> : null}
+                      {httpStatusChipLabel}
                     </span>
                     <span className="workbench-status-chip workbench-status-chip--meta">
                       <span className="workbench-status-chip-icon" aria-hidden>
@@ -1733,46 +1806,88 @@ export default function ApiWorkbench({
                       </button>
                     </div>
                   ) : (
-                    <span className="workbench-response-export">
+                    <div className="workbench-response-export-menu">
                       <button
+                        ref={visualExportMenuBtnRef}
                         type="button"
                         className="nav-btn nav-btn--compact"
-                        disabled={visualExportBusy}
-                        title="导出接口返回的全部数据（多工作表）"
-                        onClick={() => void exportVisualTable("xlsx", "all")}
+                        title="导出可视化表格"
+                        aria-expanded={visualExportMenuOpen}
+                        aria-haspopup="menu"
+                        onClick={toggleVisualExportMenu}
                       >
-                        XLSX·全部
+                        导出 ▾
                       </button>
-                      <button
-                        type="button"
-                        className="nav-btn nav-btn--compact"
-                        disabled={visualExportBusy || visualSelectedCount === 0}
-                        title={
-                          visualSelectedCount
-                            ? `仅导出已勾选的 ${visualSelectedCount} 行`
-                            : "请先在表中勾选行"
-                        }
-                        onClick={() => void exportVisualTable("xlsx", "selected")}
-                      >
-                        XLSX·所选{visualSelectedCount ? ` (${visualSelectedCount})` : ""}
-                      </button>
-                      <button
-                        type="button"
-                        className="nav-btn nav-btn--compact"
-                        disabled={
-                          visualExportBusy || visualSelectedCount === 0 || visualSelectedCount > PNG_EXPORT_MAX_ROWS
-                        }
-                        title={
-                          visualSelectedCount > PNG_EXPORT_MAX_ROWS
-                            ? `PNG 最多 ${PNG_EXPORT_MAX_ROWS} 条，请减少勾选`
-                            : `仅导出已勾选的行（最多 ${PNG_EXPORT_MAX_ROWS} 条）`
-                        }
-                        onClick={() => void exportVisualTable("png")}
-                      >
-                        PNG·所选
-                        {visualSelectedCount ? ` (${visualSelectedCount}/${PNG_EXPORT_MAX_ROWS})` : ""}
-                      </button>
-                    </span>
+                      {visualExportMenuOpen
+                        ? createPortal(
+                            <div
+                              id="workbench-visual-export-menu"
+                              className="workbench-response-export-menu-panel workbench-response-export-menu-panel--portal"
+                              role="menu"
+                              style={{
+                                top: visualExportMenuPos.top,
+                                right: visualExportMenuPos.right,
+                              }}
+                            >
+                              <button
+                                type="button"
+                                className="nav-btn nav-btn--compact"
+                                role="menuitem"
+                                disabled={visualExportBusy}
+                                title="导出接口返回的全部数据（多工作表）"
+                                onClick={() => {
+                                  setVisualExportMenuOpen(false);
+                                  void exportVisualTable("xlsx", "all");
+                                }}
+                              >
+                                XLSX·全部
+                              </button>
+                              <button
+                                type="button"
+                                className="nav-btn nav-btn--compact"
+                                role="menuitem"
+                                disabled={visualExportBusy || visualSelectedCount === 0}
+                                title={
+                                  visualSelectedCount
+                                    ? `仅导出已勾选的 ${visualSelectedCount} 行`
+                                    : "请先在表中勾选行"
+                                }
+                                onClick={() => {
+                                  setVisualExportMenuOpen(false);
+                                  void exportVisualTable("xlsx", "selected");
+                                }}
+                              >
+                                XLSX·所选{visualSelectedCount ? ` (${visualSelectedCount})` : ""}
+                              </button>
+                              <button
+                                type="button"
+                                className="nav-btn nav-btn--compact"
+                                role="menuitem"
+                                disabled={
+                                  visualExportBusy ||
+                                  visualSelectedCount === 0 ||
+                                  visualSelectedCount > PNG_EXPORT_MAX_ROWS
+                                }
+                                title={
+                                  visualSelectedCount > PNG_EXPORT_MAX_ROWS
+                                    ? `PNG 最多 ${PNG_EXPORT_MAX_ROWS} 条，请减少勾选`
+                                    : `仅导出已勾选的行（最多 ${PNG_EXPORT_MAX_ROWS} 条）`
+                                }
+                                onClick={() => {
+                                  setVisualExportMenuOpen(false);
+                                  void exportVisualTable("png");
+                                }}
+                              >
+                                PNG·所选
+                                {visualSelectedCount
+                                  ? ` (${visualSelectedCount}/${PNG_EXPORT_MAX_ROWS})`
+                                  : ""}
+                              </button>
+                            </div>,
+                            document.body,
+                          )
+                        : null}
+                    </div>
                   )}
                 </div>
               ) : protocol === "ws" && wsLog.length > 0 ? (
@@ -1837,6 +1952,17 @@ export default function ApiWorkbench({
                 ariaLabel="响应 Headers"
                 className="workbench-response-json-block"
               />
+            ) : transportErrorView ? (
+              <div className="workbench-transport-error-wrap">
+                <WorkbenchTransportErrorCard
+                  view={transportErrorView}
+                  fullLog={response.error ?? response.bodyText}
+                  insecureTls={ignoreTlsInsecure}
+                  onToggleInsecure={setInsecureTls}
+                  onRetry={() => void onSend()}
+                  onCopied={(hint) => showToast(hint ?? "已复制错误日志", 2200)}
+                />
+              </div>
             ) : responseImageSrc ? (
               <div className="workbench-response-image-pane">
                 <img className="workbench-response-image" src={responseImageSrc} alt="响应图片" />

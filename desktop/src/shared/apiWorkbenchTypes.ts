@@ -32,6 +32,8 @@ export type HttpSendPayload = {
   timeoutMs?: number;
   /** 压测时跳过响应体解码，仅统计耗时 */
   lite?: boolean;
+  /** 跳过 TLS 证书校验（等同 curl -k） */
+  insecureTls?: boolean;
 };
 
 export type HttpBenchmarkOptions = {

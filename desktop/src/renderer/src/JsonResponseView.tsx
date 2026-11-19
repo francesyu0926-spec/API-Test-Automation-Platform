@@ -35,6 +35,7 @@ import {
   toggleSelectionRow,
   type VisualRowSelection,
 } from "./jsonVisualSelection";
+import JsonVisualDetailDrawer from "./JsonVisualDetailDrawer";
 
 type JsonVisualFeatures = {
   enableRowSelection: boolean;
@@ -55,6 +56,7 @@ function useJsonVisualFeatures(): JsonVisualFeatures {
 function JsonKeyValueTable({
   title,
   entries,
+  nested = false,
   sectionKey,
   selection,
   onToggleRow,
@@ -62,38 +64,42 @@ function JsonKeyValueTable({
 }: {
   title?: string;
   entries: Array<[string, unknown]>;
+  nested?: boolean;
   sectionKey?: string;
   selection?: VisualRowSelection;
   onToggleRow?: (index: number) => void;
   onToggleAll?: (all: boolean) => void;
 }) {
-  const [expandState, setExpandState] = useState<ExpandState>({});
-  const toggle = (id: string) => setExpandState((prev) => ({ ...prev, [id]: !prev[id] }));
+  const [detailDrawer, setDetailDrawer] = useState<{ title: string; value: unknown } | null>(null);
   const selectable = Boolean(sectionKey && onToggleRow && onToggleAll);
   const selected = new Set(sectionKey ? (selection?.[sectionKey] ?? []) : []);
   const allChecked = selectable && entries.length > 0 && selected.size === entries.length;
 
   return (
-    <section className="json-vis-section">
+    <section className={`json-vis-section${nested ? " json-vis-section--nested" : ""}`}>
       {title ? <h4 className="json-vis-section-title">{title}</h4> : null}
-      <table className="json-vis-table json-vis-table--kv">
-        <thead>
-          <tr>
-            {selectable ? (
-              <th className="json-vis-table-sel" scope="col" aria-label="全选">
-                <input
-                  type="checkbox"
-                  className="workbench-kv-checkbox capture-session-checkbox"
-                  checked={allChecked}
-                  title="全选本表（含未显示行）"
-                  onChange={(e) => onToggleAll!(e.target.checked)}
-                />
-              </th>
-            ) : null}
-            <th>字段</th>
-            <th>值</th>
-          </tr>
-        </thead>
+      <table
+        className={`json-vis-table json-vis-table--kv${nested ? " json-vis-table--kv-nested" : ""}`}
+      >
+        {!nested ? (
+          <thead>
+            <tr>
+              {selectable ? (
+                <th className="json-vis-table-sel" scope="col" aria-label="全选">
+                  <input
+                    type="checkbox"
+                    className="workbench-kv-checkbox capture-session-checkbox"
+                    checked={allChecked}
+                    title="全选本表（含未显示行）"
+                    onChange={(e) => onToggleAll!(e.target.checked)}
+                  />
+                </th>
+              ) : null}
+              <th>字段</th>
+              <th>值</th>
+            </tr>
+          </thead>
+        ) : null}
         <tbody>
           {entries.map(([key, value], i) => (
             <tr key={key} className={selected.has(i) ? "json-vis-row--selected" : ""}>
@@ -113,14 +119,21 @@ function JsonKeyValueTable({
                 <JsonCellValue
                   value={value}
                   rowKey={`kv-${key}`}
-                  expandState={expandState}
-                  onToggle={toggle}
+                  detailMode="drawer"
+                  onOpenDrawer={(val, label) =>
+                    setDetailDrawer({ value: val, title: `${key} · ${label}` })
+                  }
                 />
               </td>
             </tr>
           ))}
         </tbody>
       </table>
+      {detailDrawer ? (
+        <JsonVisualDetailDrawer title={detailDrawer.title} onClose={() => setDetailDrawer(null)}>
+          <JsonNestedValue value={detailDrawer.value} />
+        </JsonVisualDetailDrawer>
+      ) : null}
     </section>
   );
 }
@@ -128,6 +141,7 @@ function JsonKeyValueTable({
 function JsonPrimitiveListTable({
   title,
   rows,
+  nested = false,
   sectionKey,
   selection,
   onToggleRow,
@@ -135,6 +149,7 @@ function JsonPrimitiveListTable({
 }: {
   title: string;
   rows: unknown[];
+  nested?: boolean;
   sectionKey?: string;
   selection?: VisualRowSelection;
   onToggleRow?: (index: number) => void;
@@ -147,7 +162,7 @@ function JsonPrimitiveListTable({
   const allChecked = selectable && rows.length > 0 && selected.size === rows.length;
 
   return (
-    <section className="json-vis-section">
+    <section className={`json-vis-section${nested ? " json-vis-section--nested" : ""}`}>
       <h4 className="json-vis-section-title">{title}</h4>
       {truncated ? (
         <p className="hint json-vis-table-hint">
@@ -160,24 +175,26 @@ function JsonPrimitiveListTable({
           ) : null}
         </p>
       ) : null}
-      <table className="json-vis-table">
-        <thead>
-          <tr>
-            {selectable ? (
-              <th className="json-vis-table-sel" scope="col" aria-label="全选">
-                <input
-                  type="checkbox"
-                  className="workbench-kv-checkbox capture-session-checkbox"
-                  checked={allChecked}
-                  title={`全选本表全部 ${rows.length} 行`}
-                  onChange={(e) => onToggleAll!(e.target.checked)}
-                />
-              </th>
-            ) : null}
-            <th className="json-vis-table-idx">序</th>
-            <th>值</th>
-          </tr>
-        </thead>
+      <table className={`json-vis-table${nested ? " json-vis-table--list-nested" : ""}`}>
+        {!nested ? (
+          <thead>
+            <tr>
+              {selectable ? (
+                <th className="json-vis-table-sel" scope="col" aria-label="全选">
+                  <input
+                    type="checkbox"
+                    className="workbench-kv-checkbox capture-session-checkbox"
+                    checked={allChecked}
+                    title={`全选本表全部 ${rows.length} 行`}
+                    onChange={(e) => onToggleAll!(e.target.checked)}
+                  />
+                </th>
+              ) : null}
+              <th className="json-vis-table-idx">序</th>
+              <th>值</th>
+            </tr>
+          </thead>
+        ) : null}
         <tbody>
           {display.map((v, i) => (
             <tr key={i} className={selected.has(i) ? "json-vis-row--selected" : ""}>
@@ -210,16 +227,30 @@ function JsonCellValue({
   rowKey,
   expandState,
   onToggle,
+  detailMode = "inline",
+  onOpenDrawer,
 }: {
   value: unknown;
   rowKey: string;
   expandState?: ExpandState;
   onToggle?: (id: string) => void;
+  detailMode?: "inline" | "drawer";
+  onOpenDrawer?: (value: unknown, label: string) => void;
 }) {
   const complex = value !== null && typeof value === "object";
   if (!complex) {
     const type =
-      value === null ? "null" : typeof value === "string" ? "string" : typeof value === "number" ? "number" : "boolean";
+      value === null
+        ? "null"
+        : typeof value === "boolean"
+          ? value
+            ? "boolean-true"
+            : "boolean-false"
+          : typeof value === "string"
+            ? "string"
+            : typeof value === "number"
+              ? "number"
+              : "boolean";
     const display = value === null ? "null" : typeof value === "string" ? value : formatJsonPrimitive(value);
     return (
       <span className={`json-vis-val json-vis-val--${type}`} title={display}>
@@ -230,24 +261,31 @@ function JsonCellValue({
 
   const cellId = `cell-${rowKey}`;
   const expanded = expandState?.[cellId] ?? false;
-  const canExpand = onToggle != null;
+  const summary = complexSummary(value);
+  const useDrawer = detailMode === "drawer" && Boolean(onOpenDrawer);
+  const canExpandInline = onToggle != null && !useDrawer;
 
   return (
     <div className="json-vis-cell-complex">
-      {canExpand ? (
+      {useDrawer || canExpandInline ? (
         <button
           type="button"
           className="json-vis-expand-btn"
-          aria-expanded={expanded}
-          onClick={() => onToggle(cellId)}
+          aria-expanded={useDrawer ? undefined : expanded}
+          aria-haspopup={useDrawer ? "dialog" : undefined}
+          onClick={() =>
+            useDrawer ? onOpenDrawer!(value, summary) : onToggle!(cellId)
+          }
         >
-          <span className="json-vis-chevron">{expanded ? "▾" : "▸"}</span>
-          {complexSummary(value)}
+          <span className="json-vis-chevron" aria-hidden>
+            {useDrawer || !expanded ? "▸" : "▾"}
+          </span>
+          {summary}
         </button>
       ) : (
-        <code className="json-vis-table-nested">{complexSummary(value)}</code>
+        <code className="json-vis-table-nested">{summary}</code>
       )}
-      {expanded && canExpand ? (
+      {expanded && canExpandInline ? (
         <div className="json-vis-cell-nested">
           <JsonNestedValue value={value} />
         </div>
@@ -259,7 +297,7 @@ function JsonCellValue({
 function JsonNestedValue({ value }: { value: unknown }) {
   if (Array.isArray(value)) {
     if (isArrayOfRecords(value)) return <JsonRecordTable title="" rows={value} nested />;
-    return <JsonPrimitiveListTable title="数组" rows={value} />;
+    return <JsonPrimitiveListTable title="数组" rows={value} nested />;
   }
   if (isRecord(value)) {
     const sections = buildVisualSections(value);
@@ -287,7 +325,7 @@ function JsonRecordTable({
   onToggleRow?: (index: number) => void;
   onToggleAll?: (all: boolean) => void;
 }) {
-  const [expandState, setExpandState] = useState<ExpandState>({});
+  const [detailDrawer, setDetailDrawer] = useState<{ title: string; value: unknown } | null>(null);
   const { enableColumnResize } = useJsonVisualFeatures();
   const columns = useMemo(() => collectFlatColumns(rows), [rows]);
   const columnSig = useMemo(() => columns.map((c) => c.path).join("\0"), [columns]);
@@ -303,10 +341,6 @@ function JsonRecordTable({
   }, [columnSig]);
 
   const colWidth = (path: string) => colWidths[path] ?? JSON_DATA_COL_DEFAULT_PX;
-
-  const toggle = (id: string) => {
-    setExpandState((prev) => ({ ...prev, [id]: !prev[id] }));
-  };
 
   return (
     <section className={`json-vis-section${nested ? " json-vis-section--nested" : ""}`}>
@@ -409,8 +443,8 @@ function JsonRecordTable({
                     <JsonCellValue
                       value={cell}
                       rowKey={`${title}-${i}-${col.path}`}
-                      expandState={expandState}
-                      onToggle={toggle}
+                      detailMode="drawer"
+                      onOpenDrawer={(val, label) => setDetailDrawer({ value: val, title: label })}
                     />
                   </td>
                 );
@@ -419,6 +453,11 @@ function JsonRecordTable({
           ))}
         </tbody>
       </table>
+      {detailDrawer ? (
+        <JsonVisualDetailDrawer title={detailDrawer.title} onClose={() => setDetailDrawer(null)}>
+          <JsonNestedValue value={detailDrawer.value} />
+        </JsonVisualDetailDrawer>
+      ) : null}
     </section>
   );
 }
@@ -426,6 +465,7 @@ function JsonRecordTable({
 function JsonArraySection({
   title,
   rows,
+  nested = false,
   sectionKey,
   selection,
   onToggleRow,
@@ -433,6 +473,7 @@ function JsonArraySection({
 }: {
   title: string;
   rows: unknown[];
+  nested?: boolean;
   sectionKey?: string;
   selection?: VisualRowSelection;
   onToggleRow?: (index: number) => void;
@@ -453,6 +494,7 @@ function JsonArraySection({
       <JsonRecordTable
         title={title}
         rows={safeRows}
+        nested={nested}
         sectionKey={sectionKey}
         selection={selection}
         onToggleRow={onToggleRow}
@@ -467,6 +509,7 @@ function JsonArraySection({
       <JsonRecordTable
         title={title}
         rows={records}
+        nested={nested}
         sectionKey={sectionKey}
         selection={selection}
         onToggleRow={onToggleRow}
@@ -479,6 +522,7 @@ function JsonArraySection({
     <JsonPrimitiveListTable
       title={title}
       rows={safeRows}
+      nested={nested}
       sectionKey={sectionKey}
       selection={selection}
       onToggleRow={onToggleRow}
@@ -517,6 +561,7 @@ function JsonSectionStack({
               key={`kv-${idx}`}
               title={sec.title}
               entries={sec.entries}
+              nested={nested}
               {...(enableRowSelection ? bindSection(sectionKey, sec.entries.length) : {})}
             />
           );
@@ -528,6 +573,7 @@ function JsonSectionStack({
               key={`arr-${sec.title}-${idx}`}
               title={sec.title}
               rows={rows}
+              nested={nested}
               {...(enableRowSelection ? bindSection(sectionKey, rows.length) : {})}
             />
           );

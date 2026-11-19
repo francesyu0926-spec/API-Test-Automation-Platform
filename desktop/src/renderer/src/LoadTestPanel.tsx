@@ -463,7 +463,7 @@ export default function LoadTestPanel({
       field.key === "timeoutMs" ? 30_000 : field.key === "rampUpSec" || field.key === "warmup" ? 0 : 1;
     return (
       <label key={field.key} className="loadtest-param-cell" title={field.hint}>
-        <span className="loadtest-param-cell-label">{field.label}</span>
+        <span className="visually-hidden">{field.label}</span>
         <div className="loadtest-param-input-wrap">
           <input
             type="number"
@@ -712,6 +712,8 @@ export default function LoadTestPanel({
           <div
             className={`loadtest-editor-scroll${
               mainTab === "config" && configNode === "httpSampler" ? " loadtest-editor-scroll--sampler" : ""
+            }${
+              mainTab === "config" && configNode === "threadGroup" ? " loadtest-editor-scroll--thread" : ""
             }`}
           >
           {mainTab === "config" && configNode === "plan" && (
@@ -735,11 +737,13 @@ export default function LoadTestPanel({
             <div className="loadtest-panel loadtest-panel--thread">
               <div className="loadtest-thread-layout">
                 <div className="loadtest-thread-shell">
-                  <header className="loadtest-thread-shell-head loadtest-thread-shell-head--row">
-                    <div>
-                      <h3 className="loadtest-thread-shell-title">线程组</h3>
-                      <p className="loadtest-thread-shell-lede">并发 · Ramp-Up · 循环</p>
-                    </div>
+                  <header className="loadtest-thread-shell-head">
+                    <h3 className="loadtest-thread-shell-title">线程组</h3>
+                    <p className="loadtest-thread-shell-lede">并发 · Ramp-Up · 循环</p>
+                  </header>
+
+                  <div className="loadtest-thread-presets-row">
+                    <span className="loadtest-thread-presets-label">快速预设</span>
                     <div className="loadtest-preset-segment" role="group" aria-label="快速预设">
                       {THREAD_PRESETS.map((preset) => {
                         const active =
@@ -759,7 +763,7 @@ export default function LoadTestPanel({
                         );
                       })}
                     </div>
-                  </header>
+                  </div>
 
                   <div className="loadtest-param-strip" aria-label="主要参数">
                     {PRIMARY_THREAD_KEYS.map((key) => renderThreadField(fieldByKey[key]))}
@@ -783,10 +787,10 @@ export default function LoadTestPanel({
                     <div className="loadtest-thread-next">
                       <button
                         type="button"
-                        className="nav-btn nav-btn--compact nav-btn--ghost"
+                        className="primary loadtest-thread-next-btn"
                         onClick={() => goConfig("httpSampler")}
                       >
-                        下一步：配置 HTTP 请求
+                        下一步：配置 HTTP 请求 →
                       </button>
                     </div>
                   ) : null}
@@ -795,68 +799,65 @@ export default function LoadTestPanel({
                 <aside className="loadtest-thread-aside" aria-label="配置清单与概览">
                   <h4 className="loadtest-aside-title">配置清单</h4>
                   <ul className="loadtest-config-checklist">
-                    <li className={project ? "loadtest-check--ok" : "loadtest-check--warn"}>
+                    <li className={`loadtest-check-item ${project ? "loadtest-check--ok" : "loadtest-check--bad"}`}>
                       <span className="loadtest-check-mark" aria-hidden>
                         {project ? "✓" : "!"}
                       </span>
-                      <span>已选项目</span>
+                      <span className="loadtest-check-text">已选项目</span>
                     </li>
-                    <li className={samplerHasTarget ? "loadtest-check--ok" : "loadtest-check--warn"}>
+                    <li
+                      className={`loadtest-check-item ${samplerHasTarget ? "loadtest-check--ok" : "loadtest-check--bad"}`}
+                    >
                       <span className="loadtest-check-mark" aria-hidden>
                         {samplerHasTarget ? "✓" : "!"}
                       </span>
-                      <span>
-                        HTTP 请求 URL
-                        {!samplerHasTarget ? (
-                          <button
-                            type="button"
-                            className="loadtest-check-link"
-                            onClick={() => goConfig("httpSampler")}
-                          >
-                            去配置
-                          </button>
-                        ) : null}
-                      </span>
+                      <span className="loadtest-check-text">HTTP 请求 URL</span>
+                      {!samplerHasTarget ? (
+                        <button
+                          type="button"
+                          className="loadtest-check-action"
+                          onClick={() => goConfig("httpSampler")}
+                        >
+                          去配置 →
+                        </button>
+                      ) : null}
                     </li>
                     <li
-                      className={
-                        missingEnvVars.length === 0 && project
-                          ? "loadtest-check--ok"
-                          : "loadtest-check--warn"
-                      }
+                      className={`loadtest-check-item ${
+                        missingEnvVars.length === 0 && project ? "loadtest-check--ok" : "loadtest-check--bad"
+                      }`}
                     >
                       <span className="loadtest-check-mark" aria-hidden>
                         {missingEnvVars.length === 0 && project ? "✓" : "!"}
                       </span>
-                      <span>
-                        环境变量（{envName}）
-                        {missingEnvVars.length > 0 ? (
-                          <button
-                            type="button"
-                            className="loadtest-check-link"
-                            onClick={() => openEnvVariables({ sampler: plan.sampler })}
-                          >
-                            填写
-                          </button>
-                        ) : null}
-                      </span>
+                      <span className="loadtest-check-text">环境变量（{envName}）</span>
+                      {missingEnvVars.length > 0 ? (
+                        <button
+                          type="button"
+                          className="loadtest-check-action"
+                          onClick={() => openEnvVariables({ sampler: plan.sampler })}
+                        >
+                          填写 →
+                        </button>
+                      ) : null}
                     </li>
                   </ul>
 
                   <h4 className="loadtest-aside-title">压测概览</h4>
-                  <ul className="loadtest-aside-stats loadtest-aside-stats--compact">
+                  <ul className="loadtest-aside-stats loadtest-aside-stats--dashboard">
                     <li>
                       <span className="loadtest-aside-stat-label">预期样本</span>
-                      <span className="loadtest-aside-stat-value">{totalSamples}</span>
+                      <span className="loadtest-aside-stat-value loadtest-aside-stat-value--hero">
+                        {totalSamples}
+                      </span>
                     </li>
                     <li>
                       <span className="loadtest-aside-stat-label">并发</span>
-                      <span className="loadtest-aside-stat-value">
+                      <span className="loadtest-aside-stat-value loadtest-aside-stat-value--hero">
                         {plan.threadGroup.threads} × {plan.threadGroup.loops}
                       </span>
                     </li>
                   </ul>
-                  <p className="hint loadtest-aside-hint">执行请用上方「生成 JMX 并执行」</p>
                 </aside>
               </div>
             </div>
@@ -953,18 +954,20 @@ export default function LoadTestPanel({
                   ) : (
                     <p className="loadtest-sampler-import-banner">
                       <span className="loadtest-sampler-import-banner-icon" aria-hidden>
-                        💡
+                        i
                       </span>
-                      你可以{" "}
-                      <button
-                        type="button"
-                        className="loadtest-sampler-import-link"
-                        disabled={!canPickFromCollection}
-                        onClick={() => setImportFromCollectionOpen(true)}
-                      >
-                        从集合导入请求
-                      </button>
-                      或手动填写下方 URL。
+                      <span className="loadtest-sampler-import-banner-text">
+                        你可以{" "}
+                        <button
+                          type="button"
+                          className="loadtest-sampler-import-link"
+                          disabled={!canPickFromCollection}
+                          onClick={() => setImportFromCollectionOpen(true)}
+                        >
+                          从集合导入请求
+                        </button>
+                        或手动填写下方 URL。
+                      </span>
                     </p>
                   )}
                 </div>

@@ -107,14 +107,14 @@ export function complexSummary(value: unknown): string {
     if (isPrimitive(value[0]) || value.every(isPrimitive)) {
       return value.map((x) => formatJsonPrimitive(x)).join(", ");
     }
-    return `数组 · ${value.length} 项`;
+    return `[] 数组 · ${value.length} 项`;
   }
   if (isRecord(value)) {
     const keys = Object.keys(value);
     if (keys.length <= 4 && keys.every((k) => isPrimitive(value[k]) || value[k] === null)) {
       return keys.map((k) => `${k}=${formatJsonPrimitive(value[k])}`).join(" · ");
     }
-    return `对象 · ${keys.length} 字段`;
+    return `{} 对象 · ${keys.length} 字段`;
   }
   return formatJsonPrimitive(value);
 }

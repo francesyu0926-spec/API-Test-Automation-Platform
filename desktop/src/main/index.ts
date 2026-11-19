@@ -27,6 +27,7 @@ import {
 } from "./projectFs";
 import { aggregateJtlFile } from "./jtlStreamParse";
 import { archiveJtlFileToPerf } from "./jtlArchive";
+import { resolveOpenDialogDefaultPath, resolveSaveDialogDefaultPath } from "./dialogDefaultPath";
 import * as perfReports from "./perfReportStore";
 import { openPdfInNewTab } from "./pdfViewer";
 import * as jmeterRunner from "./jmeterRunner";
@@ -490,7 +491,7 @@ ipcMain.handle(
     const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0];
     if (!win) return { cancelled: true };
     const { canceled, filePaths } = await dialog.showOpenDialog(win, {
-      defaultPath: opts.defaultPath,
+      defaultPath: resolveOpenDialogDefaultPath(opts.defaultPath),
       properties: ["openFile"],
       filters: opts.filters ?? [{ name: "All", extensions: ["*"] }],
     });
@@ -505,7 +506,7 @@ ipcMain.handle(
     const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0];
     if (!win) return { cancelled: true };
     const { canceled, filePaths } = await dialog.showOpenDialog(win, {
-      defaultPath: opts.defaultPath,
+      defaultPath: resolveOpenDialogDefaultPath(opts.defaultPath),
       title: opts.title ?? "选择文件夹",
       properties: ["openDirectory", "createDirectory"],
     });
@@ -523,7 +524,7 @@ ipcMain.handle(
     const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0];
     if (!win) return { ok: false, error: "无活动窗口" };
     const { canceled, filePath } = await dialog.showSaveDialog(win, {
-      defaultPath: opts.defaultPath,
+      defaultPath: resolveSaveDialogDefaultPath(opts.defaultPath, "export.txt"),
       filters: opts.filters ?? [{ name: "Text", extensions: ["txt"] }],
     });
     if (canceled || !filePath) return { ok: false, cancelled: true };
@@ -549,7 +550,7 @@ ipcMain.handle(
     const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0];
     if (!win) return { ok: false, error: "无活动窗口" };
     const { canceled, filePath } = await dialog.showSaveDialog(win, {
-      defaultPath: opts.defaultPath,
+      defaultPath: resolveSaveDialogDefaultPath(opts.defaultPath, "export.bin"),
       filters: opts.filters ?? [{ name: "File", extensions: ["bin"] }],
     });
     if (canceled || !filePath) return { ok: false, cancelled: true };

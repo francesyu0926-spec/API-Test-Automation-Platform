@@ -19,6 +19,9 @@ const HOP_HEADERS = new Set([
 const REDIRECT_STATUS = new Set([301, 302, 303, 307, 308]);
 const MAX_REDIRECTS = 10;
 
+const httpsAgentDefault = new https.Agent({ keepAlive: true });
+const httpsAgentInsecure = new https.Agent({ keepAlive: true, rejectUnauthorized: false });
+
 export async function sendHttpRequest(payload: HttpSendPayload): Promise<HttpSendResult> {
   const started = performance.now();
   const method = (payload.method || "GET").toUpperCase();
@@ -55,7 +58,15 @@ export async function sendHttpRequest(payload: HttpSendPayload): Promise<HttpSen
   const timeoutMs = payload.timeoutMs ?? 60_000;
 
   try {
-    const res = await followRedirects(url, method, headers, hasBody ? payload.body : undefined, timeoutMs);
+    const insecureTls = payload.insecureTls === true;
+    const res = await followRedirects(
+      url,
+      method,
+      headers,
+      hasBody ? payload.body : undefined,
+      timeoutMs,
+      insecureTls,
+    );
     const durationMs = Math.round(performance.now() - started);
     const bodyBuf = decompressBody(res.body, res.headers["content-encoding"]);
     const contentType = res.headers["content-type"] ?? null;
@@ -126,9 +137,12 @@ function httpOnce(
   headers: Record<string, string>,
   body: string | undefined,
   timeoutMs: number,
+  insecureTls: boolean,
 ): Promise<RawResponse> {
   const lib = url.protocol === "https:" ? https : http;
   const port = url.port ? Number(url.port) : url.protocol === "https:" ? 443 : 80;
+  const agent =
+    url.protocol === "https:" ? (insecureTls ? httpsAgentInsecure : httpsAgentDefault) : undefined;
 
   return new Promise((resolve, reject) => {
     const req = lib.request(
@@ -140,6 +154,7 @@ function httpOnce(
         method,
         headers,
         timeout: timeoutMs,
+        agent,
       },
       (res) => {
         void collectResponseBody(res, timeoutMs)
@@ -170,13 +185,14 @@ async function followRedirects(
   headers: Record<string, string>,
   body: string | undefined,
   timeoutMs: number,
+  insecureTls: boolean,
 ): Promise<RawResponse> {
   let currentUrl = new URL(startUrl);
   let currentMethod = method;
   let currentBody = body;
 
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
-    const res = await httpOnce(currentUrl, currentMethod, headers, currentBody, timeoutMs);
+    const res = await httpOnce(currentUrl, currentMethod, headers, currentBody, timeoutMs, insecureTls);
     if (!REDIRECT_STATUS.has(res.statusCode)) return res;
 
     const location = res.headers.location;
@@ -242,7 +258,7 @@ function enrichNetworkError(message: string): string {
   } else if (code === "ETIMEDOUT" || code === "ESOCKETTIMEDOUT") {
     lines.push("连接超时，请检查网络或增大超时时间。");
   } else if (/certificate|cert|ssl|tls/i.test(base)) {
-    lines.push("TLS 证书校验失败；内网自签证书需在后续版本支持跳过校验。");
+    lines.push("TLS 证书校验失败；可在错误卡片中开启「忽略证书校验」后重新 Send。");
   } else if (/econnreset/i.test(lower) && /tls|secure/i.test(lower)) {
     lines.push(
       "TLS 握手被中断（常见于出口防火墙、需专用网络/VPN，或需在公司内网访问）。可用浏览器打开同一 URL 对比是否正常。",
