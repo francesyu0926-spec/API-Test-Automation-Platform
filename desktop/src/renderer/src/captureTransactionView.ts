@@ -165,6 +165,22 @@ export function formatCaptureBodyText(
   return text;
 }
 
+/** Body 文本是否适合按 JSON 高亮（Content-Type 或结构） */
+export function bodyTextLooksLikeJson(text: string, contentType?: string): boolean {
+  const ct = contentType?.toLowerCase() ?? "";
+  if (ct.includes("json") || ct.includes("+json")) return true;
+  const trim = text.trim();
+  if (!trim || trim.startsWith("(")) return false;
+  if (!trim.startsWith("{") && !trim.startsWith("[")) return false;
+  if (trim.length > 512_000) return false;
+  try {
+    JSON.parse(trim);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function formatCaptureHeaders(headers: Record<string, string> | undefined): string {
   if (!headers || !Object.keys(headers).length) return "(无)";
   return Object.entries(headers)

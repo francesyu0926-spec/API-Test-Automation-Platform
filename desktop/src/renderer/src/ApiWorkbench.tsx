@@ -31,6 +31,7 @@ import {
   shouldSuggestWsAfterHttp,
 } from "./workbenchWsHint";
 import { applyImportedCurlAuth, coalesceAuthVariables, unresolvedWorkbenchVars } from "./samplerAuth";
+import CaptureCodeBlock from "./CaptureCodeBlock";
 import JsonResponseView, { type JsonResponseViewHandle } from "./JsonResponseView";
 import { countSelectedRows } from "./jsonVisualSelection";
 import { businessLoginHintFromBody, parseResponseJson } from "./parseResponseJson";
@@ -68,6 +69,13 @@ type Props = {
 
 type ReqTab = "params" | "headers" | "body";
 type Protocol = "http" | "ws";
+
+const HTTP_BODY_CONTENT_TYPES = [
+  { value: "application/json", label: "JSON" },
+  { value: "application/xml", label: "XML" },
+  { value: "text/plain", label: "Text" },
+  { value: "text/html", label: "HTML" },
+] as const;
 
 type WsLogLine = {
   at: string;
@@ -127,6 +135,7 @@ export default function ApiWorkbench({
   const [sending, setSending] = useState(false);
   const [response, setResponse] = useState<HttpSendResult | null>(null);
   const [respBodyMode, setRespBodyMode] = useState<"raw" | "visual">("visual");
+  const [respJsonPretty, setRespJsonPretty] = useState(true);
   const [visualExportBusy, setVisualExportBusy] = useState(false);
   const [visualSelectedCount, setVisualSelectedCount] = useState(0);
   const jsonVisualRef = useRef<JsonResponseViewHandle>(null);
@@ -941,6 +950,39 @@ export default function ApiWorkbench({
     return response.bodyText;
   }, [response, respView, responseImageSrc, responseContentType, responseJson]);
 
+  const responseRawCopyPayload = useMemo(() => {
+    if (!responseBodyDisplay) return "";
+    if (responseJson == null) return responseBodyDisplay;
+    if (respJsonPretty) {
+      try {
+        return JSON.stringify(JSON.parse(responseBodyDisplay), null, 2);
+      } catch {
+        return responseBodyDisplay;
+      }
+    }
+    try {
+      return JSON.stringify(JSON.parse(responseBodyDisplay));
+    } catch {
+      return responseBodyDisplay;
+    }
+  }, [responseBodyDisplay, responseJson, respJsonPretty]);
+
+  const copyResponseBody = useCallback(async () => {
+    const text = responseRawCopyPayload;
+    if (!text) return;
+    try {
+      await window.atp.copyText(text);
+      showToast("已复制响应体");
+    } catch {
+      try {
+        await navigator.clipboard.writeText(text);
+        showToast("已复制响应体");
+      } catch {
+        /* ignore */
+      }
+    }
+  }, [responseRawCopyPayload]);
+
   const exportVisualTable = useCallback(
     async (format: "xlsx" | "png", xlsxScope: "all" | "selected" = "all") => {
       if (!responseJson || visualExportBusy) return;
@@ -1088,6 +1130,21 @@ export default function ApiWorkbench({
       /* ignore */
     }
   }, [responsePaneHeight]);
+
+  const kvRowCount =
+    reqTab === "params" ? draft.query.length : reqTab === "headers" ? draft.headers.length : 0;
+  const requestPaneCompact =
+    (reqTab === "body" && protocol === "http" && draft.bodyMode === "none") ||
+    ((reqTab === "params" || reqTab === "headers") && !kvBulkOpen && kvRowCount <= 4);
+
+  const bodyContentTypeOptions = useMemo(() => {
+    const base = HTTP_BODY_CONTENT_TYPES.map((o) => ({ value: o.value, label: o.label }));
+    const cur = draft.bodyContentType;
+    if (cur && !base.some((o) => o.value === cur)) {
+      return [...base, { value: cur, label: cur }];
+    }
+    return base;
+  }, [draft.bodyContentType]);
 
   const switchToWebSocketMode = () => {
     setProtocol("ws");
@@ -1344,36 +1401,23 @@ export default function ApiWorkbench({
                 aria-label="请求名称"
                 onChange={(e) => setDraft((d) => ({ ...d, name: e.target.value }))}
               />
-              <span className="workbench-meta-tag-sep" aria-hidden />
-              <label className="workbench-meta-tag" title="请求分组（文件夹）">
-                <span className="workbench-meta-pick-icon">
+              <label className="workbench-meta-ghost-field" title="请求分组（文件夹）">
+                <span className="workbench-meta-pick-icon" aria-hidden>
                   <WorkbenchGroupFolderIcon />
                 </span>
                 <input
-                  className="workbench-meta-tag-input"
+                  className="workbench-meta-ghost-input"
                   value={draft.folder ?? ""}
                   placeholder="未分组"
                   aria-label="分组"
                   onChange={(e) => setDraft((d) => ({ ...d, folder: e.target.value }))}
                 />
               </label>
-              <span className="workbench-meta-tag-sep" aria-hidden />
-              <span
-                className="workbench-meta-tag workbench-meta-tag--readonly"
-                title={`保存写入左侧当前集合模块「${activeCollectionName}」`}
-              >
-                <span className="workbench-meta-pick-icon">
-                  <WorkbenchSaveCollectionIcon />
-                </span>
-                <span className="workbench-meta-save-hint">
-                  将保存至：<strong>{activeCollectionName}</strong>
-                </span>
-              </span>
             </div>
-            <div className="workbench-meta-actions" role="toolbar" aria-label="请求操作">
+            <div className="workbench-meta-actions workbench-meta-actions--compact" role="toolbar" aria-label="请求操作">
               <button
                 type="button"
-                className="nav-btn nav-btn--compact nav-btn--accent"
+                className="nav-btn nav-btn--compact nav-btn--accent workbench-meta-action-btn"
                 title="保存到集合并同步 YAML 用例"
                 onClick={() => void saveCurrent()}
               >
@@ -1382,7 +1426,7 @@ export default function ApiWorkbench({
               {onSendToLoadTest && protocol === "http" ? (
                 <button
                   type="button"
-                  className="nav-btn nav-btn--compact nav-btn--ghost"
+                  className="nav-btn nav-btn--compact nav-btn--ghost workbench-meta-action-btn"
                   title="将当前请求带到负载测试页"
                   onClick={() =>
                     onSendToLoadTest({
@@ -1395,20 +1439,36 @@ export default function ApiWorkbench({
                   {applyToLoadTest ? "应用到压测" : "发送到压测"}
                 </button>
               ) : null}
-              {activeRequestId ? (
-                <button
-                  type="button"
-                  className="nav-btn nav-btn--compact nav-btn--ghost"
-                  title="从集合中删除当前请求"
-                  onClick={() => deleteActive()}
-                >
-                  删除
-                </button>
-              ) : null}
+              <details className="capture-detail-more workbench-meta-more">
+                <summary className="capture-detail-more-summary workbench-meta-more-summary" aria-label="更多操作">
+                  ⋯
+                </summary>
+                <div className="capture-detail-more-menu workbench-meta-more-menu">
+                  <p className="workbench-meta-menu-static" title="保存目标集合模块">
+                    <span className="workbench-meta-menu-static-icon" aria-hidden>
+                      <WorkbenchSaveCollectionIcon />
+                    </span>
+                    保存至「{activeCollectionName}」
+                  </p>
+                  {activeRequestId ? (
+                    <button
+                      type="button"
+                      className="capture-detail-more-item capture-detail-more-item--danger"
+                      onClick={() => deleteActive()}
+                    >
+                      删除当前请求
+                    </button>
+                  ) : null}
+                </div>
+              </details>
             </div>
           </div>
 
-          <div className="workbench-editor-zone workbench-editor-zone--request">
+          <div
+            className={`workbench-editor-zone workbench-editor-zone--request${
+              requestPaneCompact ? " workbench-editor-zone--request-compact" : ""
+            }`}
+          >
             <div className="workbench-req-tabs-bar">
               <div className="workbench-req-tabs workbench-req-tabs--segmented" role="tablist" aria-label="请求配置">
                 {(
@@ -1430,19 +1490,6 @@ export default function ApiWorkbench({
                   </button>
                 ))}
               </div>
-              {reqTab === "params" || reqTab === "headers" ? (
-                <button
-                  type="button"
-                  className="workbench-kv-tab-bulk"
-                  onClick={() => {
-                    const table = reqTab === "params" ? queryKvRef.current : headersKvRef.current;
-                    if (kvBulkOpen) table?.closeBulk();
-                    else table?.openBulk();
-                  }}
-                >
-                  {kvBulkOpen ? "返回表格" : "⇌ 批量编辑"}
-                </button>
-              ) : null}
             </div>
 
             <div className="workbench-editor-pane">
@@ -1473,60 +1520,76 @@ export default function ApiWorkbench({
                 />
               )}
               {reqTab === "body" && (
-                <div className="workbench-body-pane">
-                  {protocol === "http" && (
+                <div
+                  className={`workbench-body-pane${
+                    protocol === "http" && draft.bodyMode === "none" ? " workbench-body-pane--none" : ""
+                  }`}
+                >
+                  {protocol === "http" ? (
                     <>
-                      <label className="check-label">
-                        <input
-                          type="radio"
-                          checked={draft.bodyMode === "none"}
-                          onChange={() => setDraft((d) => ({ ...d, bodyMode: "none" }))}
-                        />
-                        none
-                      </label>
-                      <label className="check-label">
-                        <input
-                          type="radio"
-                          checked={draft.bodyMode === "raw"}
-                          onChange={() => setDraft((d) => normalizeRawBodyDraft({ ...d, bodyMode: "raw" }))}
-                        />
-                        raw
-                      </label>
-                    </>
-                  )}
-                  {(protocol === "ws" || draft.bodyMode === "raw") && (
-                    <>
-                      {protocol === "http" && (
-                        <AppCustomSelect
-                          variant="inline"
-                          className="workbench-content-type"
-                          value={draft.bodyContentType ?? "application/json"}
-                          ariaLabel="Content-Type"
-                          options={[
-                            { value: "application/json", label: "application/json" },
-                            {
-                              value: "application/x-www-form-urlencoded",
-                              label: "application/x-www-form-urlencoded",
-                            },
-                            { value: "text/plain", label: "text/plain" },
-                          ]}
-                          onChange={(bodyContentType) => setDraft((d) => ({ ...d, bodyContentType }))}
-                        />
+                      <div
+                        className="run-detail-segmented workbench-body-mode-segmented"
+                        role="radiogroup"
+                        aria-label="请求体类型"
+                      >
+                        <button
+                          type="button"
+                          role="radio"
+                          aria-checked={draft.bodyMode === "none"}
+                          className={`run-detail-segmented-btn${
+                            draft.bodyMode === "none" ? " run-detail-segmented-btn--active" : ""
+                          }`}
+                          onClick={() => setDraft((d) => ({ ...d, bodyMode: "none" }))}
+                        >
+                          none
+                        </button>
+                        <button
+                          type="button"
+                          role="radio"
+                          aria-checked={draft.bodyMode === "raw"}
+                          className={`run-detail-segmented-btn${
+                            draft.bodyMode === "raw" ? " run-detail-segmented-btn--active" : ""
+                          }`}
+                          onClick={() => setDraft((d) => normalizeRawBodyDraft({ ...d, bodyMode: "raw" }))}
+                        >
+                          raw
+                        </button>
+                      </div>
+                      {draft.bodyMode === "none" ? (
+                        <p className="workbench-body-none-hint">当前请求不包含 Body 数据。</p>
+                      ) : (
+                        <div className="workbench-body-raw">
+                          <div className="workbench-body-raw-toolbar">
+                            <span className="workbench-body-raw-toolbar-label">Content-Type</span>
+                            <AppCustomSelect
+                              variant="inline"
+                              className="workbench-content-type"
+                              value={draft.bodyContentType ?? "application/json"}
+                              ariaLabel="Content-Type"
+                              options={bodyContentTypeOptions}
+                              onChange={(bodyContentType) => setDraft((d) => ({ ...d, bodyContentType }))}
+                            />
+                          </div>
+                          <textarea
+                            className="workbench-body-textarea"
+                            value={draft.body}
+                            spellCheck={false}
+                            placeholder='例如 {"key": "value"}'
+                            onChange={(e) => setDraft((d) => ({ ...d, body: e.target.value }))}
+                          />
+                        </div>
                       )}
-                      <textarea
-                        className="workbench-body-textarea"
-                        value={draft.body}
-                        spellCheck={false}
-                        placeholder={protocol === "ws" ? "连接后点击 Send 发送此消息…" : undefined}
-                        onChange={(e) =>
-                          setDraft((d) =>
-                            protocol === "ws"
-                              ? { ...d, bodyMode: "raw", body: e.target.value }
-                              : { ...d, body: e.target.value },
-                          )
-                        }
-                      />
                     </>
+                  ) : (
+                    <textarea
+                      className="workbench-body-textarea"
+                      value={draft.body}
+                      spellCheck={false}
+                      placeholder="连接后点击 Send 发送此消息…"
+                      onChange={(e) =>
+                        setDraft((d) => ({ ...d, bodyMode: "raw", body: e.target.value }))
+                      }
+                    />
                   )}
                 </div>
               )}
@@ -1546,133 +1609,175 @@ export default function ApiWorkbench({
 
           <div
             className="workbench-editor-zone workbench-editor-zone--response workbench-response"
-            style={{ flex: `0 0 ${responsePaneHeight}px`, height: responsePaneHeight }}
+            style={{ flex: "1 1 0", minHeight: responsePaneHeight }}
           >
             <div className="workbench-response-head">
-              {protocol === "ws" ? (
-                <span className="workbench-response-title workbench-response-title--ws">
+              <div className="workbench-response-head-row workbench-response-head-row--primary">
+                {protocol === "ws" ? (
+                  <span className="workbench-response-title workbench-response-title--ws">
+                    <span
+                      className={`workbench-ws-status-dot workbench-ws-status-dot--sm${
+                        wsOpen
+                          ? " workbench-ws-status-dot--open"
+                          : wsConnecting
+                            ? " workbench-ws-status-dot--connecting"
+                            : " workbench-ws-status-dot--closed"
+                      }`}
+                      aria-hidden
+                    />
+                    Messages
+                  </span>
+                ) : (
+                  <div className="workbench-resp-tabs workbench-resp-tabs--underline" role="tablist" aria-label="响应">
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={respView === "body"}
+                      className={`workbench-resp-tab${respView === "body" ? " workbench-resp-tab--active" : ""}`}
+                      onClick={() => setRespView("body")}
+                    >
+                      Body
+                    </button>
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={respView === "headers"}
+                      className={`workbench-resp-tab${respView === "headers" ? " workbench-resp-tab--active" : ""}`}
+                      onClick={() => setRespView("headers")}
+                    >
+                      Headers
+                    </button>
+                  </div>
+                )}
+                {protocol === "http" && response ? (
+                  <div className="workbench-status-chips" role="group" aria-label="响应摘要">
+                    <span
+                      className={`workbench-status-chip workbench-status-chip--code ${httpStatusTone(
+                        response.status,
+                        response.ok,
+                      )}`}
+                    >
+                      <span className="workbench-status-chip-dot" aria-hidden />
+                      {(response.status || "—") + (response.statusText ? ` ${response.statusText}` : "")}
+                    </span>
+                    <span className="workbench-status-chip workbench-status-chip--meta">
+                      <span className="workbench-status-chip-icon" aria-hidden>
+                        ⏱
+                      </span>
+                      {response.durationMs} ms
+                    </span>
+                    <span className="workbench-status-chip workbench-status-chip--meta">
+                      <span className="workbench-status-chip-icon" aria-hidden>
+                        ▣
+                      </span>
+                      {response.bodySize} B
+                    </span>
+                  </div>
+                ) : null}
+                {protocol === "ws" ? (
                   <span
-                    className={`workbench-ws-status-dot workbench-ws-status-dot--sm${
-                      wsOpen
-                        ? " workbench-ws-status-dot--open"
-                        : wsConnecting
-                          ? " workbench-ws-status-dot--connecting"
-                          : " workbench-ws-status-dot--closed"
-                    }`}
-                    aria-hidden
-                  />
-                  Messages
-                </span>
-              ) : (
-                <div className="workbench-resp-tabs workbench-segmented" role="tablist" aria-label="响应">
-                  <button
-                    type="button"
-                    role="tab"
-                    aria-selected={respView === "body"}
-                    className={`workbench-segmented-btn${respView === "body" ? " workbench-segmented-btn--active" : ""}`}
-                    onClick={() => setRespView("body")}
+                    className={`workbench-status-chip workbench-status-chip--code ${wsOpen ? "ok" : wsConnecting ? "" : "err"}`}
                   >
-                    Body
-                  </button>
-                  <button
-                    type="button"
-                    role="tab"
-                    aria-selected={respView === "headers"}
-                    className={`workbench-segmented-btn${respView === "headers" ? " workbench-segmented-btn--active" : ""}`}
-                    onClick={() => setRespView("headers")}
-                  >
-                    Headers
+                    <span className="workbench-status-chip-dot" aria-hidden />
+                    {wsOpen ? "OPEN" : wsConnecting ? "CONNECTING…" : "CLOSED"}
+                  </span>
+                ) : null}
+              </div>
+              {protocol === "http" && responseJson != null && respView === "body" ? (
+                <div className="workbench-response-head-row workbench-response-head-row--tools" role="toolbar" aria-label="响应体工具">
+                  <span className="workbench-response-head-spacer" />
+                  <div className="run-detail-segmented workbench-response-format-segmented" role="group" aria-label="响应体格式">
+                    <button
+                      type="button"
+                      className={`run-detail-segmented-btn${respBodyMode === "visual" ? " run-detail-segmented-btn--active" : ""}`}
+                      onClick={() => setRespBodyMode("visual")}
+                    >
+                      可视化
+                    </button>
+                    <button
+                      type="button"
+                      className={`run-detail-segmented-btn${respBodyMode === "raw" ? " run-detail-segmented-btn--active" : ""}`}
+                      onClick={() => setRespBodyMode("raw")}
+                    >
+                      JSON
+                    </button>
+                  </div>
+                  {respBodyMode === "raw" ? (
+                    <div className="workbench-response-json-actions">
+                      <button
+                        type="button"
+                        className="run-detail-response-icon-btn"
+                        title="复制响应体"
+                        aria-label="复制"
+                        onClick={() => void copyResponseBody()}
+                      >
+                        <span aria-hidden>📋</span>
+                        <span>复制</span>
+                      </button>
+                      <button
+                        type="button"
+                        className="run-detail-response-icon-btn"
+                        title={respJsonPretty ? "压缩为一行" : "格式化缩进"}
+                        aria-label={respJsonPretty ? "压缩" : "格式化"}
+                        onClick={() => setRespJsonPretty((v) => !v)}
+                      >
+                        <span className="run-detail-response-format-icon" aria-hidden>
+                          {"{}"}
+                        </span>
+                        <span>{respJsonPretty ? "压缩" : "格式化"}</span>
+                      </button>
+                    </div>
+                  ) : (
+                    <span className="workbench-response-export">
+                      <button
+                        type="button"
+                        className="nav-btn nav-btn--compact"
+                        disabled={visualExportBusy}
+                        title="导出接口返回的全部数据（多工作表）"
+                        onClick={() => void exportVisualTable("xlsx", "all")}
+                      >
+                        XLSX·全部
+                      </button>
+                      <button
+                        type="button"
+                        className="nav-btn nav-btn--compact"
+                        disabled={visualExportBusy || visualSelectedCount === 0}
+                        title={
+                          visualSelectedCount
+                            ? `仅导出已勾选的 ${visualSelectedCount} 行`
+                            : "请先在表中勾选行"
+                        }
+                        onClick={() => void exportVisualTable("xlsx", "selected")}
+                      >
+                        XLSX·所选{visualSelectedCount ? ` (${visualSelectedCount})` : ""}
+                      </button>
+                      <button
+                        type="button"
+                        className="nav-btn nav-btn--compact"
+                        disabled={
+                          visualExportBusy || visualSelectedCount === 0 || visualSelectedCount > PNG_EXPORT_MAX_ROWS
+                        }
+                        title={
+                          visualSelectedCount > PNG_EXPORT_MAX_ROWS
+                            ? `PNG 最多 ${PNG_EXPORT_MAX_ROWS} 条，请减少勾选`
+                            : `仅导出已勾选的行（最多 ${PNG_EXPORT_MAX_ROWS} 条）`
+                        }
+                        onClick={() => void exportVisualTable("png")}
+                      >
+                        PNG·所选
+                        {visualSelectedCount ? ` (${visualSelectedCount}/${PNG_EXPORT_MAX_ROWS})` : ""}
+                      </button>
+                    </span>
+                  )}
+                </div>
+              ) : protocol === "ws" && wsLog.length > 0 ? (
+                <div className="workbench-response-head-row workbench-response-head-row--tools">
+                  <span className="workbench-response-head-spacer" />
+                  <button type="button" className="workbench-tab small" onClick={() => setWsLog([])}>
+                    清空
                   </button>
                 </div>
-              )}
-              {protocol === "http" && response && (
-                <span className={`workbench-status ${httpStatusTone(response.status, response.ok)}`}>
-                  {response.status || "—"} {response.statusText} · {response.durationMs} ms · {response.bodySize} B
-                </span>
-              )}
-              {protocol === "ws" && (
-                <span className={`workbench-status ${wsOpen ? "ok" : wsConnecting ? "" : "err"}`}>
-                  {wsOpen ? "OPEN" : wsConnecting ? "CONNECTING…" : "CLOSED"}
-                </span>
-              )}
-              {protocol === "http" && (
-                <>
-                  <span className="workbench-response-head-spacer" />
-                  {responseJson != null && respView === "body" ? (
-                    <span className="workbench-response-format workbench-segmented" role="group" aria-label="响应体格式">
-                      <button
-                        type="button"
-                        className={`workbench-segmented-btn workbench-segmented-btn--compact${
-                          respBodyMode === "visual" ? " workbench-segmented-btn--active" : ""
-                        }`}
-                        onClick={() => setRespBodyMode("visual")}
-                      >
-                        可视化
-                      </button>
-                      <button
-                        type="button"
-                        className={`workbench-segmented-btn workbench-segmented-btn--compact${
-                          respBodyMode === "raw" ? " workbench-segmented-btn--active" : ""
-                        }`}
-                        onClick={() => setRespBodyMode("raw")}
-                      >
-                        JSON
-                      </button>
-                      {respBodyMode === "visual" ? (
-                        <span className="workbench-response-export">
-                          <button
-                            type="button"
-                            className="nav-btn nav-btn--compact"
-                            disabled={visualExportBusy}
-                            title="导出接口返回的全部数据（多工作表）"
-                            onClick={() => void exportVisualTable("xlsx", "all")}
-                          >
-                            XLSX·全部
-                          </button>
-                          <button
-                            type="button"
-                            className="nav-btn nav-btn--compact"
-                            disabled={visualExportBusy || visualSelectedCount === 0}
-                            title={
-                              visualSelectedCount
-                                ? `仅导出已勾选的 ${visualSelectedCount} 行`
-                                : "请先在表中勾选行"
-                            }
-                            onClick={() => void exportVisualTable("xlsx", "selected")}
-                          >
-                            XLSX·所选{visualSelectedCount ? ` (${visualSelectedCount})` : ""}
-                          </button>
-                          <button
-                            type="button"
-                            className="nav-btn nav-btn--compact"
-                            disabled={
-                              visualExportBusy ||
-                              visualSelectedCount === 0 ||
-                              visualSelectedCount > PNG_EXPORT_MAX_ROWS
-                            }
-                            title={
-                              visualSelectedCount > PNG_EXPORT_MAX_ROWS
-                                ? `PNG 最多 ${PNG_EXPORT_MAX_ROWS} 条，请减少勾选`
-                                : `仅导出已勾选的行（最多 ${PNG_EXPORT_MAX_ROWS} 条）`
-                            }
-                            onClick={() => void exportVisualTable("png")}
-                          >
-                            PNG·所选
-                            {visualSelectedCount
-                              ? ` (${visualSelectedCount}/${PNG_EXPORT_MAX_ROWS})`
-                              : ""}
-                          </button>
-                        </span>
-                      ) : null}
-                    </span>
-                  ) : null}
-                </>
-              )}
-              {protocol === "ws" && wsLog.length > 0 && (
-                <button type="button" className="workbench-tab small" onClick={() => setWsLog([])}>
-                  清空
-                </button>
-              )}
+              ) : null}
             </div>
             {protocol === "http" && wsSwitchHint && response ? (
               <div className="workbench-ws-hint">
@@ -1686,6 +1791,7 @@ export default function ApiWorkbench({
                 </button>
               </div>
             ) : null}
+            <div className="workbench-response-body">
             {protocol === "ws" ? (
               wsLog.length ? (
                 <pre className="workbench-response-pre workbench-ws-log">
@@ -1716,7 +1822,16 @@ export default function ApiWorkbench({
                 </div>
               </div>
             ) : respView === "headers" ? (
-              <pre className="workbench-response-pre">{JSON.stringify(response.headers, null, 2)}</pre>
+              <CaptureCodeBlock
+                fullText={JSON.stringify(response.headers, null, 2)}
+                language="json"
+                hideToolbar
+                jsonPretty={respJsonPretty}
+                onJsonPrettyChange={setRespJsonPretty}
+                maxHeight="100%"
+                ariaLabel="响应 Headers"
+                className="workbench-response-json-block"
+              />
             ) : responseImageSrc ? (
               <div className="workbench-response-image-pane">
                 <img className="workbench-response-image" src={responseImageSrc} alt="响应图片" />
@@ -1729,9 +1844,23 @@ export default function ApiWorkbench({
                 className="workbench-response-visual"
                 onSelectionChange={(sel) => setVisualSelectedCount(countSelectedRows(sel))}
               />
+            ) : responseJson != null && respBodyMode === "raw" ? (
+              <CaptureCodeBlock
+                fullText={responseBodyDisplay || response.error || "(空响应)"}
+                language="json"
+                hideToolbar
+                jsonPretty={respJsonPretty}
+                onJsonPrettyChange={setRespJsonPretty}
+                maxHeight="100%"
+                ariaLabel="响应 JSON"
+                className="workbench-response-json-block"
+              />
             ) : (
-              <pre className="workbench-response-pre">{responseBodyDisplay || response.error || "(空响应)"}</pre>
+              <pre className="workbench-response-pre workbench-response-pre--scroll">
+                {responseBodyDisplay || response.error || "(空响应)"}
+              </pre>
             )}
+            </div>
           </div>
         </section>
       </div>

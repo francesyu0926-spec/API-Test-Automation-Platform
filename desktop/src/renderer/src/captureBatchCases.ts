@@ -6,6 +6,8 @@ export type BatchCaseRow = {
   path: string;
   url: string;
   caseName: string;
+  /** 保存前可编辑的用例 YAML */
+  yaml: string;
 };
 
 export function buildBatchCaseRows(
@@ -21,6 +23,6 @@ export function buildBatchCaseRows(
       n += 1;
     }
     used.add(name);
-    return { txId: t.id, method: t.method, path: t.path, url: t.url, caseName: name };
+    return { txId: t.id, method: t.method, path: t.path, url: t.url, caseName: name, yaml: "" };
   });
 }

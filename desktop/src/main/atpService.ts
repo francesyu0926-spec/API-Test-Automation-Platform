@@ -241,17 +241,69 @@ export async function readTextFile(relativePath: string): Promise<string | null>
   }
 }
 
+/** index.json 为空时，从 runs/<id>/summary.json 回填索引 */
+async function rebuildRunsIndexFromDisk(repoRoot: string): Promise<RunIndexEntry[]> {
+  const runsDir = path.join(repoRoot, "runs");
+  const entries: RunIndexEntry[] = [];
+  let dirEntries: string[] = [];
+  try {
+    dirEntries = await fs.readdir(runsDir);
+  } catch {
+    return [];
+  }
+  for (const name of dirEntries) {
+    if (name === "index.json" || name === "by-month") continue;
+    const summaryPath = path.join(runsDir, name, "summary.json");
+    try {
+      const summary = await readJson<{
+        id?: string;
+        project?: string;
+        suite?: string;
+        environment?: string;
+        status?: string;
+        started_at?: string;
+      } | null>(summaryPath, null);
+      if (!summary?.id || !summary.started_at) continue;
+      entries.push({
+        id: summary.id,
+        project: summary.project ?? "",
+        suite: summary.suite ?? "",
+        environment: summary.environment ?? "",
+        status: summary.status ?? "error",
+        started_at: summary.started_at,
+        dir: `runs/${summary.id}`,
+      });
+    } catch {
+      // skip broken run dir
+    }
+  }
+  entries.sort((a, b) => (b.started_at || "").localeCompare(a.started_at || ""));
+  if (!entries.length) return [];
+  const indexPath = path.join(runsDir, "index.json");
+  await atomicWriteJson(indexPath, {
+    version: 1,
+    updated_at: utcNowIso(),
+    runs: entries,
+  });
+  return entries;
+}
+
 export async function listRuns(filter?: {
   project?: string;
   status?: string;
   limit?: number;
 }): Promise<RunIndexEntry[]> {
-  const indexPath = path.join(getRepoRoot(), "runs", "index.json");
+  const repoRoot = getRepoRoot();
+  const indexPath = path.join(repoRoot, "runs", "index.json");
   const index = await readJson<{ runs?: RunIndexEntry[] }>(indexPath, { runs: [] });
   let runs = index.runs ?? [];
+  if (!runs.length) {
+    const rebuilt = await rebuildRunsIndexFromDisk(repoRoot);
+    if (rebuilt.length) runs = rebuilt;
+  }
   if (filter?.project) runs = runs.filter((r) => r.project === filter.project);
   if (filter?.status) runs = runs.filter((r) => r.status === filter.status);
-  const limit = filter?.limit ?? 50;
+  const limit = filter?.limit ?? 200;
   return runs.slice(0, limit);
 }
 

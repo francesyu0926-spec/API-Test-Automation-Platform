@@ -20,6 +20,7 @@ import {
   complexSummary,
   formatJsonPrimitive,
   getAtPath,
+  inferColumnCellKind,
   isArrayOfRecords,
   isPrimitive,
   isRecord,
@@ -79,9 +80,10 @@ function JsonKeyValueTable({
         <thead>
           <tr>
             {selectable ? (
-              <th className="json-vis-table-sel">
+              <th className="json-vis-table-sel" scope="col" aria-label="全选">
                 <input
                   type="checkbox"
+                  className="workbench-kv-checkbox capture-session-checkbox"
                   checked={allChecked}
                   title="全选本表（含未显示行）"
                   onChange={(e) => onToggleAll!(e.target.checked)}
@@ -99,6 +101,7 @@ function JsonKeyValueTable({
                 <td className="json-vis-table-sel">
                   <input
                     type="checkbox"
+                    className="workbench-kv-checkbox capture-session-checkbox"
                     checked={selected.has(i)}
                     onChange={() => onToggleRow!(i)}
                     aria-label={`选择字段 ${key}`}
@@ -161,16 +164,17 @@ function JsonPrimitiveListTable({
         <thead>
           <tr>
             {selectable ? (
-              <th className="json-vis-table-sel">
+              <th className="json-vis-table-sel" scope="col" aria-label="全选">
                 <input
                   type="checkbox"
+                  className="workbench-kv-checkbox capture-session-checkbox"
                   checked={allChecked}
                   title={`全选本表全部 ${rows.length} 行`}
                   onChange={(e) => onToggleAll!(e.target.checked)}
                 />
               </th>
             ) : null}
-            <th className="json-vis-table-idx">#</th>
+            <th className="json-vis-table-idx">序</th>
             <th>值</th>
           </tr>
         </thead>
@@ -179,7 +183,12 @@ function JsonPrimitiveListTable({
             <tr key={i} className={selected.has(i) ? "json-vis-row--selected" : ""}>
               {selectable ? (
                 <td className="json-vis-table-sel">
-                  <input type="checkbox" checked={selected.has(i)} onChange={() => onToggleRow!(i)} />
+                  <input
+                    type="checkbox"
+                    className="workbench-kv-checkbox capture-session-checkbox"
+                    checked={selected.has(i)}
+                    onChange={() => onToggleRow!(i)}
+                  />
                 </td>
               ) : null}
               <td className="json-vis-table-idx">{i + 1}</td>
@@ -328,22 +337,24 @@ function JsonRecordTable({
         <thead>
           <tr>
             {selectable ? (
-              <th className="json-vis-table-sel">
+              <th className="json-vis-table-sel" scope="col" aria-label="全选">
                 <input
                   type="checkbox"
+                  className="workbench-kv-checkbox capture-session-checkbox"
                   checked={allChecked}
                   title={`全选本表全部 ${rows.length} 行`}
                   onChange={(e) => onToggleAll!(e.target.checked)}
                 />
               </th>
             ) : null}
-            <th className="json-vis-table-idx">#</th>
+            <th className="json-vis-table-idx">序</th>
             {columns.map((col) => {
               const w = colWidth(col.path);
+              const kind = inferColumnCellKind(rows, col.path);
               return (
                 <th
                   key={col.path}
-                  className={enableColumnResize ? "json-vis-th--resizable" : undefined}
+                  className={`json-vis-col--${kind}${enableColumnResize ? " json-vis-th--resizable" : ""}`}
                   style={enableColumnResize ? { width: w, minWidth: w, maxWidth: w } : undefined}
                   title={col.header}
                 >
@@ -371,16 +382,23 @@ function JsonRecordTable({
             <tr key={i} className={selected.has(i) ? "json-vis-row--selected" : ""}>
               {selectable ? (
                 <td className="json-vis-table-sel">
-                  <input type="checkbox" checked={selected.has(i)} onChange={() => onToggleRow!(i)} />
+                  <input
+                    type="checkbox"
+                    className="workbench-kv-checkbox capture-session-checkbox"
+                    checked={selected.has(i)}
+                    onChange={() => onToggleRow!(i)}
+                  />
                 </td>
               ) : null}
               <td className="json-vis-table-idx">{i + 1}</td>
               {columns.map((col) => {
                 const cell = getAtPath(row, col.path);
                 const w = enableColumnResize ? colWidth(col.path) : undefined;
+                const kind = inferColumnCellKind(rows, col.path);
                 return (
                   <td
                     key={col.path}
+                    className={`json-vis-col--${kind}`}
                     style={w != null ? { width: w, minWidth: w, maxWidth: w } : undefined}
                     title={
                       cell !== null && cell !== undefined && typeof cell !== "object"

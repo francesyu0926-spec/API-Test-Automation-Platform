@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 
 import type { BatchCaseRow } from "./captureBatchCases";
 import ProjectTargetField, { suggestBaseUrlFromUrls } from "./ProjectTargetField";
+import YamlHighlightEditor from "./YamlHighlightEditor";
 
 type Props = {
   open: boolean;
@@ -17,6 +18,7 @@ type Props = {
     overwriteExisting: boolean;
     openProjects: boolean;
   }) => void;
+  onCopied?: (message: string) => void;
 };
 
 export default function BatchSaveCasesDialog({
@@ -26,8 +28,10 @@ export default function BatchSaveCasesDialog({
   defaultProjectId,
   onCancel,
   onConfirm,
+  onCopied,
 }: Props) {
   const [items, setItems] = useState<BatchCaseRow[]>([]);
+  const [expandedTxId, setExpandedTxId] = useState<string | null>(null);
   const [addToSuite, setAddToSuite] = useState(true);
   const [suiteName, setSuiteName] = useState("smoke");
   const [overwriteExisting, setOverwriteExisting] = useState(false);
@@ -42,6 +46,7 @@ export default function BatchSaveCasesDialog({
   useEffect(() => {
     if (!open) return;
     setItems(rows.map((r) => ({ ...r })));
+    setExpandedTxId(rows[0]?.txId ?? null);
   }, [open, rows]);
 
   if (!open) return null;
@@ -53,6 +58,11 @@ export default function BatchSaveCasesDialog({
   const removeItem = (txId: string) => {
     if (saving) return;
     setItems((prev) => prev.filter((r) => r.txId !== txId));
+    setExpandedTxId((cur) => (cur === txId ? null : cur));
+  };
+
+  const patchYaml = (txId: string, yaml: string) => {
+    setItems((prev) => prev.map((r) => (r.txId === txId ? { ...r, yaml } : r)));
   };
 
   return (
@@ -93,31 +103,54 @@ export default function BatchSaveCasesDialog({
                 </tr>
               ) : (
                 items.map((r) => (
-                  <tr key={r.txId}>
-                    <td>{r.method}</td>
-                    <td className="url-cell" title={r.url}>
-                      {r.path}
-                    </td>
-                    <td>
-                      <input
-                        className="text-input batch-save-case-name"
-                        value={r.caseName}
-                        disabled={saving}
-                        onChange={(e) => patchName(r.txId, e.target.value)}
-                      />
-                    </td>
-                    <td className="batch-save-col-action">
-                      <button
-                        type="button"
-                        className="nav-btn batch-save-remove"
-                        disabled={saving}
-                        title="从本次保存列表移除"
-                        onClick={() => removeItem(r.txId)}
-                      >
-                        移除
-                      </button>
-                    </td>
-                  </tr>
+                  <Fragment key={r.txId}>
+                    <tr>
+                      <td>{r.method}</td>
+                      <td className="url-cell" title={r.url}>
+                        {r.path}
+                      </td>
+                      <td>
+                        <input
+                          className="text-input batch-save-case-name"
+                          value={r.caseName}
+                          disabled={saving}
+                          onChange={(e) => patchName(r.txId, e.target.value)}
+                        />
+                      </td>
+                      <td className="batch-save-col-action">
+                        <button
+                          type="button"
+                          className={`nav-btn nav-btn--compact nav-btn--ghost batch-save-yaml-toggle${expandedTxId === r.txId ? " batch-save-yaml-toggle--open" : ""}`}
+                          disabled={saving}
+                          title="展开或收起 YAML 编辑"
+                          onClick={() => setExpandedTxId((cur) => (cur === r.txId ? null : r.txId))}
+                        >
+                          {expandedTxId === r.txId ? "收起 YAML" : "编辑 YAML"}
+                        </button>
+                        <button
+                          type="button"
+                          className="nav-btn batch-save-remove"
+                          disabled={saving}
+                          title="从本次保存列表移除"
+                          onClick={() => removeItem(r.txId)}
+                        >
+                          移除
+                        </button>
+                      </td>
+                    </tr>
+                    {expandedTxId === r.txId ? (
+                      <tr key={`${r.txId}-yaml`} className="batch-save-yaml-row">
+                        <td colSpan={4}>
+                          <YamlHighlightEditor
+                            value={r.yaml}
+                            onChange={(yaml) => patchYaml(r.txId, yaml)}
+                            onCopied={onCopied}
+                            ariaLabel={`${r.caseName} YAML`}
+                          />
+                        </td>
+                      </tr>
+                    ) : null}
+                  </Fragment>
                 ))
               )}
             </tbody>

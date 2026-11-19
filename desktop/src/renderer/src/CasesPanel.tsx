@@ -14,6 +14,7 @@ import { newCaseYaml } from "./newCaseTemplate";
 import type { SavedApiRequest, WorkbenchDraft } from "../../shared/apiWorkbenchTypes";
 import { applyImportedCurlAuth } from "./samplerAuth";
 import { useProjectEnvOptional } from "./ProjectEnvContext";
+import CaptureCodeBlock from "./CaptureCodeBlock";
 
 type CollectionRow = {
   collectionId: string;
@@ -78,6 +79,7 @@ export default function CasesPanel({
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
   const [pendingDelete, setPendingDelete] = useState(false);
+  const [pendingCollectionDelete, setPendingCollectionDelete] = useState<CollectionRow | null>(null);
   const [newCaseOpen, setNewCaseOpen] = useState(false);
   const [newCaseName, setNewCaseName] = useState("new-case");
   const [caseFilter, setCaseFilter] = useState("");
@@ -320,6 +322,22 @@ export default function CasesPanel({
     const draft = normalizeRawBodyDraft(savedRequestToDraft(row.request));
     onOpenInWorkbench(draft, { requestId: row.request.id, collectionId: row.collectionId });
   };
+
+  const onDeleteCollectionRequest = async (row: CollectionRow) => {
+    const col = await window.atp.getCollection(project, row.collectionId);
+    if (!col) {
+      showMsg("找不到集合文件");
+      return;
+    }
+    const next = { ...col, requests: col.requests.filter((r) => r.id !== row.request.id) };
+    await window.atp.saveCollection(project, next);
+    const key = collectionRowKey(row);
+    if (selectedCollectionKey === key) setSelectedCollectionKey(null);
+    setPendingCollectionDelete(null);
+    await loadCollectionRows();
+    showMsg("已从集合移除请求");
+    onRefresh();
+  };
   // onCasePreviewChange 在 App 内做浅比较，避免重复 setState
 
   const showMsg = (text: string) => {
@@ -489,16 +507,45 @@ export default function CasesPanel({
     <>
       <section className="card cases-panel-shell">
         <header className="cases-panel-head">
-          <div className="cases-panel-head-text">
-            <h3 className="cases-panel-heading">用例与集合</h3>
+          <h3 className="cases-panel-heading">用例与集合</h3>
+        </header>
+
+        <div className="cases-panel-split">
+          <div className="cases-list-mode-tabs cases-panel-list-tabs" role="tablist" aria-label="列表类型">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={listMode === "yaml"}
+              className={`cases-list-mode-tab${listMode === "yaml" ? " cases-list-mode-tab--active" : ""}`}
+              onClick={() => {
+                setListMode("yaml");
+                setListPage(1);
+              }}
+            >
+              <span className="cases-list-mode-tab-title">YAML</span>
+              <span className="cases-list-mode-tab-count">{cases.length}</span>
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={listMode === "collection"}
+              className={`cases-list-mode-tab${listMode === "collection" ? " cases-list-mode-tab--active" : ""}`}
+              onClick={() => {
+                setListMode("collection");
+                setListPage(1);
+              }}
+            >
+              <span className="cases-list-mode-tab-title">集合</span>
+              <span className="cases-list-mode-tab-count">{collectionRows.length}</span>
+            </button>
           </div>
-          <div className="cases-panel-head-actions">
-            <button type="button" className="primary" onClick={() => setNewCaseOpen(true)}>
+          <div className="cases-panel-split-actions" role="toolbar" aria-label="用例操作">
+            <button type="button" className="primary nav-btn--compact" onClick={() => setNewCaseOpen(true)}>
               新建用例
             </button>
             <button
               type="button"
-              className="nav-btn"
+              className="nav-btn nav-btn--compact"
               title={
                 cases.length
                   ? "将全部 YAML 用例合成一个 JMeter 测试计划"
@@ -509,72 +556,95 @@ export default function CasesPanel({
               生成 JMX（全部）
             </button>
           </div>
-        </header>
-
-        <div className="cases-panel-split">
           <aside className="cases-panel-list" aria-label="用例列表">
-            <div className="cases-list-mode-tabs" role="tablist" aria-label="列表类型">
-              <button
-                type="button"
-                role="tab"
-                aria-selected={listMode === "yaml"}
-                className={`cases-list-mode-tab${listMode === "yaml" ? " cases-list-mode-tab--active" : ""}`}
-                onClick={() => {
-                  setListMode("yaml");
-                  setListPage(1);
-                }}
-              >
-                <span className="cases-list-mode-tab-title">YAML</span>
-                <span className="cases-list-mode-tab-count">{cases.length}</span>
-              </button>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={listMode === "collection"}
-                className={`cases-list-mode-tab${listMode === "collection" ? " cases-list-mode-tab--active" : ""}`}
-                onClick={() => {
-                  setListMode("collection");
-                  setListPage(1);
-                }}
-              >
-                <span className="cases-list-mode-tab-title">集合</span>
-                <span className="cases-list-mode-tab-count">{collectionRows.length}</span>
-              </button>
-            </div>
-            <input
-              type="search"
-              className="text-input cases-panel-search"
-              placeholder={listMode === "yaml" ? "搜索用例" : "搜索名称 / URL"}
-              value={caseFilter}
-              onChange={(e) => setCaseFilter(e.target.value)}
-            />
-            <div className="case-list-scroll cases-panel-list-scroll">
+            <label className="cases-panel-search-wrap">
+              <span className="cases-panel-search-icon" aria-hidden>
+                ⌕
+              </span>
+              <input
+                type="search"
+                className="text-input cases-panel-search"
+                placeholder={listMode === "yaml" ? "搜索用例" : "搜索名称 / URL"}
+                value={caseFilter}
+                onChange={(e) => setCaseFilter(e.target.value)}
+              />
+            </label>
+            {listMode === "yaml" && !cases.length ? (
+              <div className="cases-panel-list-body cases-panel-list-body--empty-yaml">
+                <div className="case-list-empty case-list-empty--yaml">
+                  <CasesListEmptyIcon prominent />
+                  <p className="case-list-empty-title">暂无 YAML 用例</p>
+                  <p className="case-list-empty-hint">
+                    {collectionRows.length > 0
+                      ? "工作台已有集合请求，或新建用例。"
+                      : "可新建用例，或在抓包中保存为用例。"}
+                  </p>
+                  <div className="case-list-empty-actions">
+                    <button type="button" className="primary nav-btn--compact" onClick={() => setNewCaseOpen(true)}>
+                      + 新建用例
+                    </button>
+                    {collectionRows.length > 0 ? (
+                      <button
+                        type="button"
+                        className="nav-btn nav-btn--compact nav-btn--ghost case-list-empty-link"
+                        onClick={() => {
+                          setListMode("collection");
+                          setListPage(1);
+                        }}
+                      >
+                        切到「集合」查看
+                      </button>
+                    ) : null}
+                  </div>
+                </div>
+              </div>
+            ) : (
+            <div className="case-list-scroll cases-panel-list-scroll capture-scroll-slim">
               {listMode === "yaml" &&
                 pagedCases.map((c) => (
-                  <button
-                    key={c}
-                    type="button"
-                    className={`case-list-row${activeCase === c ? " active" : ""}`}
-                    onMouseDown={(e) => {
-                      if (e.button !== 0) return;
-                      e.preventDefault();
-                      selectCase(c);
-                    }}
-                    title={c}
-                  >
-                    {c}
-                  </button>
+                  <div key={c} className={`case-list-item${activeCase === c ? " active" : ""}`}>
+                    <button
+                      type="button"
+                      className="case-list-item-main"
+                      onMouseDown={(e) => {
+                        if (e.button !== 0) return;
+                        e.preventDefault();
+                        selectCase(c);
+                      }}
+                      title={c}
+                    >
+                      {c}
+                    </button>
+                    <div className="case-list-item-actions">
+                      <button
+                        type="button"
+                        className="case-list-item-action"
+                        title="编辑 YAML"
+                        aria-label={`编辑 ${c}`}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          selectCase(c);
+                          setEditing(true);
+                        }}
+                      >
+                        <CasesRowEditIcon />
+                      </button>
+                      <button
+                        type="button"
+                        className="case-list-item-action case-list-item-action--danger"
+                        title="删除用例"
+                        aria-label={`删除 ${c}`}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onActiveCaseNameChange(c);
+                          setPendingDelete(true);
+                        }}
+                      >
+                        <CasesRowTrashIcon />
+                      </button>
+                    </div>
+                  </div>
                 ))}
-              {listMode === "yaml" && !cases.length && (
-                <div className="case-list-empty">
-                  <p className="case-list-empty-title">暂无用例</p>
-                  <p className="case-list-empty-hint">
-                    {collectionRows.length
-                      ? `工作台已有 ${collectionRows.length} 条集合请求，请切到「集合请求」查看；或在此处新建 / 抓包「保存为用例」。`
-                      : "新建、抓包或在工作台「保存为用例」。"}
-                  </p>
-                </div>
-              )}
               {listMode === "yaml" && cases.length > 0 && !filteredCases.length && (
                 <div className="case-list-empty">无匹配</div>
               )}
@@ -584,32 +654,64 @@ export default function CasesPanel({
                   const url = buildUrl(row.request.url, row.request.query);
                   const label = row.request.name?.trim() || row.request.id;
                   const showModule = row.collectionName && row.collectionName !== "默认模块";
+                  const methodCls = `method-tag method-${row.request.method.toLowerCase()}`;
                   return (
-                    <button
+                    <div
                       key={key}
-                      type="button"
-                      className={`case-list-row case-list-row--collection${
+                      className={`case-list-item case-list-item--collection${
                         selectedCollectionKey === key ? " active" : ""
                       }`}
-                      onClick={() => setSelectedCollectionKey(key)}
-                      title={url}
                     >
-                      <span className="case-list-row-collection-main">
-                        <span
-                          className={`cases-method-pill cases-method-pill--compact cases-method-pill--${row.request.method.toLowerCase()}`}
-                        >
-                          {row.request.method}
+                      <button
+                        type="button"
+                        className="case-list-item-main case-list-item-main--collection"
+                        onClick={() => setSelectedCollectionKey(key)}
+                        title={url}
+                      >
+                        <span className="case-list-row-collection-main">
+                          <span className={methodCls}>{row.request.method}</span>
+                          <span className="case-list-row-collection-name">{label}</span>
                         </span>
-                        <span className="case-list-row-collection-name">{label}</span>
-                      </span>
-                      {showModule ? (
-                        <span className="case-list-row-collection-meta">{row.collectionName}</span>
-                      ) : null}
-                    </button>
+                        {showModule ? (
+                          <span className="case-list-row-collection-meta">{row.collectionName}</span>
+                        ) : null}
+                      </button>
+                      <div className="case-list-item-actions">
+                        {onOpenInWorkbench ? (
+                          <button
+                            type="button"
+                            className="case-list-item-action"
+                            title="在工作台编辑"
+                            aria-label={`编辑 ${label}`}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setSelectedCollectionKey(key);
+                              openCollectionInWorkbench(row);
+                            }}
+                          >
+                            <CasesRowEditIcon />
+                          </button>
+                        ) : null}
+                        <button
+                          type="button"
+                          className="case-list-item-action case-list-item-action--danger"
+                          title="从集合移除"
+                          aria-label={`删除 ${label}`}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setSelectedCollectionKey(key);
+                            setPendingCollectionDelete(row);
+                          }}
+                        >
+                          <CasesRowTrashIcon />
+                        </button>
+                      </div>
+                    </div>
                   );
                 })}
               {listMode === "collection" && !collectionRows.length && (
                 <div className="case-list-empty">
+                  <CasesListEmptyIcon />
                   <p className="case-list-empty-title">暂无集合请求</p>
                   <p className="case-list-empty-hint">在 API 工作台调试后点「保存到集合」。</p>
                 </div>
@@ -618,6 +720,7 @@ export default function CasesPanel({
                 <div className="case-list-empty">无匹配</div>
               )}
             </div>
+            )}
             {listItemCount > CASE_LIST_PAGE && (
               <div className="pagination case-list-pagination cases-panel-list-pagination">
                 <button
@@ -651,39 +754,55 @@ export default function CasesPanel({
             />
             {listMode === "collection" && selectedCollectionRow && (
               <>
-                <div className="cases-panel-detail-head cases-panel-detail-head--inline">
-                  <div className="cases-panel-detail-title-block">
-                    <h4 className="cases-panel-detail-name">{selectedCollectionRow.request.name || "未命名请求"}</h4>
-                    <p className="cases-panel-detail-request">
-                      <span
-                        className={`cases-method-pill cases-method-pill--${selectedCollectionRow.request.method.toLowerCase()}`}
+                <header className="cases-panel-detail-head">
+                  <div className="cases-panel-detail-head-row">
+                    <h4 className="cases-panel-detail-name">
+                      {selectedCollectionRow.request.name || "未命名请求"}
+                    </h4>
+                    {onOpenInWorkbench ? (
+                      <button
+                        type="button"
+                        className="nav-btn nav-btn--compact nav-btn--ghost cases-panel-detail-open-wb"
+                        onClick={() => openCollectionInWorkbench(selectedCollectionRow)}
                       >
-                        {selectedCollectionRow.request.method}
-                      </span>
-                      <span className="cases-panel-detail-url">
-                        {buildUrl(selectedCollectionRow.request.url, selectedCollectionRow.request.query)}
-                      </span>
-                    </p>
+                        在工作台打开
+                      </button>
+                    ) : null}
                   </div>
-                  {onOpenInWorkbench ? (
-                    <button
-                      type="button"
-                      className="primary nav-btn--compact cases-panel-detail-head-action"
-                      onClick={() => openCollectionInWorkbench(selectedCollectionRow)}
+                  <p className="cases-panel-detail-request cases-panel-detail-request--sub">
+                    <span className={`method-tag method-${selectedCollectionRow.request.method.toLowerCase()}`}>
+                      {selectedCollectionRow.request.method}
+                    </span>
+                    <span
+                      className="cases-panel-detail-url cases-panel-detail-url--wrap"
+                      title={buildUrl(selectedCollectionRow.request.url, selectedCollectionRow.request.query)}
                     >
-                      在工作台打开
-                    </button>
-                  ) : null}
+                      {buildUrl(selectedCollectionRow.request.url, selectedCollectionRow.request.query)}
+                    </span>
+                  </p>
+                </header>
+                <div className="cases-panel-yaml-host">
+                  <CaptureCodeBlock
+                    fullText={JSON.stringify(selectedCollectionRow.request, null, 2)}
+                    language="json"
+                    maxHeight="none"
+                    ariaLabel="集合请求 JSON"
+                    onCopied={(msg) => onNotify?.(msg)}
+                  />
                 </div>
-                <pre className="case-yaml-pre cases-panel-yaml-pre">
-                  {JSON.stringify(selectedCollectionRow.request, null, 2)}
-                </pre>
               </>
             )}
-            {listMode === "yaml" && !activeCase && !cases.length && (
-              <div className="cases-panel-detail-empty">
-                <p className="cases-panel-detail-empty-title">选择左侧用例</p>
-                <p className="hint">预览 YAML、编辑或在 API 工作台打开</p>
+            {listMode === "yaml" && !activeCase && (
+              <div className="cases-panel-detail-empty cases-panel-detail-empty--dim">
+                <CasesYamlPreviewWatermark />
+                <p className="cases-panel-detail-empty-title">
+                  {cases.length > 0 ? "选择左侧用例" : "YAML 预览区"}
+                </p>
+                <p className="hint cases-panel-detail-empty-hint">
+                  {cases.length > 0
+                    ? "预览 YAML、编辑或在 API 工作台打开"
+                    : "在左侧新建用例，或切换到「集合」查看请求详情"}
+                </p>
               </div>
             )}
             {listMode === "collection" && !selectedCollectionRow && (
@@ -694,55 +813,53 @@ export default function CasesPanel({
             )}
             {listMode === "yaml" && activeCase && (
               <>
-                <div className="cases-panel-detail-head">
-                  <div className="cases-panel-detail-title-block">
+                <header className="cases-panel-detail-head">
+                  <div className="cases-panel-detail-head-row">
                     <h4 className="cases-panel-detail-name">{activeCase}</h4>
-                    {selectedCaseSummary && (
-                      <p className="cases-panel-detail-request" title={selectedCaseSummary.url}>
-                        <span
-                          className={`cases-method-pill cases-method-pill--${selectedCaseSummary.method.toLowerCase()}`}
-                        >
-                          {selectedCaseSummary.method}
-                        </span>
-                        <span className="cases-panel-detail-url">{selectedCaseSummary.url}</span>
-                      </p>
-                    )}
+                    {onOpenInWorkbench && !editing ? (
+                      <button
+                        type="button"
+                        className="nav-btn nav-btn--compact nav-btn--ghost cases-panel-detail-open-wb"
+                        onClick={() => {
+                          void (async () => {
+                            const draft = caseYamlToWorkbenchDraft(resolvedCaseYaml);
+                            if (!draft) {
+                              const msg = "无法解析用例 YAML";
+                              showMsg(msg);
+                              onNotify?.(msg);
+                              return;
+                            }
+                            const env = projectEnv?.envName ?? "dev";
+                            let openDraft = draft;
+                            try {
+                              const synced = await applyImportedCurlAuth(project, env, draft);
+                              openDraft = synced.draft;
+                              await projectEnv?.refreshVariables();
+                            } catch (err) {
+                              onNotify?.(err instanceof Error ? err.message : "同步鉴权变量到环境失败");
+                            }
+                            onOpenInWorkbench(openDraft);
+                          })();
+                        }}
+                      >
+                        在工作台打开
+                      </button>
+                    ) : null}
                   </div>
+                  {selectedCaseSummary ? (
+                    <p className="cases-panel-detail-request cases-panel-detail-request--sub" title={selectedCaseSummary.url}>
+                      <span className={`method-tag method-${selectedCaseSummary.method.toLowerCase()}`}>
+                        {selectedCaseSummary.method}
+                      </span>
+                      <span className="cases-panel-detail-url cases-panel-detail-url--wrap">
+                        {selectedCaseSummary.url}
+                      </span>
+                    </p>
+                  ) : null}
                   <nav className="cases-panel-detail-toolbar" aria-label="用例操作">
                     {!editing ? (
                       <>
                         <div className="cases-panel-detail-toolbar-start">
-                          {onOpenInWorkbench && (
-                            <button
-                              type="button"
-                              className="primary nav-btn--compact"
-                              onClick={() => {
-                                void (async () => {
-                                  const draft = caseYamlToWorkbenchDraft(resolvedCaseYaml);
-                                  if (!draft) {
-                                    const msg = "无法解析用例 YAML";
-                                    showMsg(msg);
-                                    onNotify?.(msg);
-                                    return;
-                                  }
-                                  const env = projectEnv?.envName ?? "dev";
-                                  let openDraft = draft;
-                                  try {
-                                    const synced = await applyImportedCurlAuth(project, env, draft);
-                                    openDraft = synced.draft;
-                                    await projectEnv?.refreshVariables();
-                                  } catch (err) {
-                                    onNotify?.(
-                                      err instanceof Error ? err.message : "同步鉴权变量到环境失败",
-                                    );
-                                  }
-                                  onOpenInWorkbench(openDraft);
-                                })();
-                              }}
-                            >
-                              在工作台打开
-                            </button>
-                          )}
                           <div className="cases-panel-detail-btn-group" role="group" aria-label="编辑与导出">
                             <button type="button" className="nav-btn nav-btn--compact" onClick={() => setEditing(true)}>
                               编辑 YAML
@@ -787,7 +904,7 @@ export default function CasesPanel({
                       </div>
                     )}
                   </nav>
-                </div>
+                </header>
                 <div className="cases-panel-yaml-host">
                   {editing ? (
                     <textarea
@@ -797,11 +914,18 @@ export default function CasesPanel({
                       onChange={(e) => setEditDraft(e.target.value)}
                     />
                   ) : (
-                    <pre key={activeCase} className="case-yaml-pre cases-panel-yaml-pre">
-                      {resolvedCaseYaml.trim()
-                        ? resolvedCaseYaml
-                        : "（文件为空或无法读取，请检查 projects/…/cases 下的 YAML）"}
-                    </pre>
+                    <CaptureCodeBlock
+                      key={activeCase}
+                      fullText={
+                        resolvedCaseYaml.trim()
+                          ? resolvedCaseYaml
+                          : "（文件为空或无法读取，请检查 projects/…/cases 下的 YAML）"
+                      }
+                      language="yaml"
+                      maxHeight="none"
+                      ariaLabel="用例 YAML"
+                      onCopied={(msg) => onNotify?.(msg)}
+                    />
                   )}
                 </div>
               </>
@@ -892,6 +1016,82 @@ export default function CasesPanel({
         onCancel={() => setPendingDelete(false)}
         onConfirm={() => void onDelete()}
       />
+
+      <ConfirmDialog
+        open={Boolean(pendingCollectionDelete)}
+        title="从集合移除"
+        message={`将移除「${pendingCollectionDelete?.request.name || pendingCollectionDelete?.request.id || "请求"}」，集合文件会更新。`}
+        confirmLabel="移除"
+        danger
+        onCancel={() => setPendingCollectionDelete(null)}
+        onConfirm={() => {
+          if (pendingCollectionDelete) void onDeleteCollectionRequest(pendingCollectionDelete);
+        }}
+      />
     </>
+  );
+}
+
+function CasesYamlPreviewWatermark() {
+  return (
+    <div className="cases-yaml-preview-watermark" aria-hidden>
+      <svg viewBox="0 0 120 120" focusable="false">
+        <text
+          x="50%"
+          y="54%"
+          dominantBaseline="middle"
+          textAnchor="middle"
+          fill="currentColor"
+          fontSize="42"
+          fontFamily="ui-monospace, Consolas, monospace"
+          fontWeight="600"
+        >
+          {"</>"}
+        </text>
+      </svg>
+    </div>
+  );
+}
+
+function CasesListEmptyIcon({ prominent = false }: { prominent?: boolean }) {
+  return (
+    <div
+      className={`case-list-empty-icon${prominent ? " case-list-empty-icon--prominent" : ""}`}
+      aria-hidden
+    >
+      <svg className="case-list-empty-icon-svg" viewBox="0 0 48 48" focusable="false">
+        <path
+          d="M12 8h16l8 8v24a2 2 0 0 1-2 2H12a2 2 0 0 1-2-2V10a2 2 0 0 1 2-2Z"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.5"
+          strokeLinejoin="round"
+        />
+        <path d="M28 8v8h8" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" />
+        <path d="M16 22h16M16 28h12" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" opacity="0.65" />
+      </svg>
+    </div>
+  );
+}
+
+function CasesRowEditIcon() {
+  return (
+    <svg viewBox="0 0 16 16" width={14} height={14} aria-hidden focusable="false">
+      <path
+        fill="currentColor"
+        d="M11.8 1.9a1.2 1.2 0 0 1 1.7 0l.6.6a1.2 1.2 0 0 1 0 1.7l-7.4 7.4-2.4.8.8-2.4 6.3-6.3ZM3 12.5V14h1.5l6.8-6.8-.8-.8L3 12.5Z"
+      />
+    </svg>
+  );
+}
+
+function CasesRowTrashIcon() {
+  return (
+    <svg viewBox="0 0 16 16" width={14} height={14} aria-hidden focusable="false">
+      <path
+        fill="currentColor"
+        d="M5.5 1.75a.75.75 0 0 1 .75-.75H9.75a.75.75 0 0 1 .75.75V3h3.25a.75.75 0 0 1 0 1.5h-.38l-.83 9.2A1.5 1.5 0 0 1 11.08 15H4.92a1.5 1.5 0 0 1-1.49-1.3l-.83-9.2H2.5a.75.75 0 0 1 0-1.5H5.5V1.75Zm2 .75v.5h1.5V2.5H7.5ZM4.5 4.5l.78 8.6a.25.25 0 0 0 .24.22h5.16a.25.25 0 0 0 .24-.22l.78-8.6H4.5Z"
+      />
+    </svg>
   );
 }

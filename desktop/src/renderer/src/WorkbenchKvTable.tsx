@@ -172,7 +172,7 @@ const WorkbenchKvTable = forwardRef<WorkbenchKvTableHandle, WorkbenchKvTableProp
             <span className="workbench-kv-col workbench-kv-col--check">
               <input
                 type="checkbox"
-                className="capture-session-checkbox"
+                className="workbench-kv-checkbox capture-session-checkbox"
                 checked={row.enabled}
                 aria-label={`启用参数 ${i + 1}`}
                 onChange={(e) => onChange(i, { enabled: e.target.checked })}
@@ -227,9 +227,18 @@ const WorkbenchKvTable = forwardRef<WorkbenchKvTableHandle, WorkbenchKvTableProp
           </div>
         ))}
       </div>
-      <button type="button" className="workbench-kv-add-dashed" onClick={onAdd}>
-        + 添加行
-      </button>
+      <div className="workbench-kv-footer">
+        <button type="button" className="workbench-kv-add-link" onClick={onAdd}>
+          + 添加一行
+        </button>
+        <button
+          type="button"
+          className="workbench-kv-bulk-ghost"
+          onClick={() => (bulkOpen ? closeBulk() : openBulk())}
+        >
+          {bulkOpen ? "返回表格" : "⇌ 批量编辑"}
+        </button>
+      </div>
     </div>
   );
 });

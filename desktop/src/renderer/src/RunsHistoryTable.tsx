@@ -163,8 +163,6 @@ type ProjectOption = { id: string; name: string };
 type Props = {
   runs: RunHistoryRow[];
   projects: ProjectOption[];
-  /** 侧栏已选项目时锁定筛选，不再显示「项目」胶囊 */
-  scopeProjectId?: string | null;
   selectedRunId: string | null;
   onSelect: (runId: string) => void;
   /** 当前选中记录不在筛选结果内时回调（避免下方仍展示旧详情） */
@@ -176,7 +174,6 @@ type Props = {
 export default function RunsHistoryTable({
   runs,
   projects,
-  scopeProjectId,
   selectedRunId,
   onSelect,
   onClearSelection,
@@ -281,14 +278,8 @@ export default function RunsHistoryTable({
     return filtered.slice(start, start + PAGE_SIZE);
   }, [filtered, page]);
 
-  const projectLocked = Boolean(scopeProjectId?.trim());
-
-  useEffect(() => {
-    if (scopeProjectId?.trim()) setProjectFilter(scopeProjectId.trim());
-  }, [scopeProjectId]);
-
   const hasActiveFilters = Boolean(
-    (projectFilter && (!projectLocked || projectFilter !== scopeProjectId)) ||
+    projectFilter ||
       envFilter ||
       statusFilter ||
       fromDate ||
@@ -299,8 +290,7 @@ export default function RunsHistoryTable({
   );
 
   const clearFilters = () => {
-    if (projectLocked && scopeProjectId) setProjectFilter(scopeProjectId);
-    else setProjectFilter("");
+    setProjectFilter("");
     setEnvFilter("");
     setStatusFilter("");
     clearTimeRange();
@@ -494,33 +484,31 @@ export default function RunsHistoryTable({
     <>
       <section className="run-filter-panel run-filter-panel--compact" role="search" aria-label="筛选执行记录">
         <div className="run-filter-bar" ref={filterBarRef}>
-          {!projectLocked ? (
-            <FilterPill
-              dim="项目"
-              valueLabel={projectPillLabel}
-              active={Boolean(projectFilter)}
-              showDefaultIcon={!projectFilter}
-              defaultIcon="filter"
-              open={openMenu === "project"}
-              onToggle={() => toggleMenu("project")}
-            >
-              <div className="run-filter-dropdown-menu" role="menu">
-                <FilterMenuItem selected={!projectFilter} onClick={() => pickOption(() => setProjectFilter(""))}>
-                  不限
+          <FilterPill
+            dim="项目"
+            valueLabel={projectPillLabel}
+            active={Boolean(projectFilter)}
+            showDefaultIcon={!projectFilter}
+            defaultIcon="filter"
+            open={openMenu === "project"}
+            onToggle={() => toggleMenu("project")}
+          >
+            <div className="run-filter-dropdown-menu" role="menu">
+              <FilterMenuItem selected={!projectFilter} onClick={() => pickOption(() => setProjectFilter(""))}>
+                不限
+              </FilterMenuItem>
+              {projectOptions.map((p) => (
+                <FilterMenuItem
+                  key={p.id}
+                  selected={projectFilter === p.id}
+                  title={`${p.name}（${p.id}）`}
+                  onClick={() => pickOption(() => setProjectFilter(p.id))}
+                >
+                  {p.name}
                 </FilterMenuItem>
-                {projectOptions.map((p) => (
-                  <FilterMenuItem
-                    key={p.id}
-                    selected={projectFilter === p.id}
-                    title={`${p.name}（${p.id}）`}
-                    onClick={() => pickOption(() => setProjectFilter(p.id))}
-                  >
-                    {p.name}
-                  </FilterMenuItem>
-                ))}
-              </div>
-            </FilterPill>
-          ) : null}
+              ))}
+            </div>
+          </FilterPill>
 
           <FilterPill
             dim="环境"
@@ -775,7 +763,9 @@ export default function RunsHistoryTable({
             {runs.length > 0 && !filtered.length && (
               <tr>
                 <td colSpan={6} className="run-history-empty">
-                  无匹配结果
+                  {projectFilter
+                    ? `当前项目「${resolveProjectName(projectFilter)}」无匹配记录。可点「重置筛选」或项目选「不限」。`
+                    : "无匹配结果，请调整筛选或搜索条件。"}
                 </td>
               </tr>
             )}

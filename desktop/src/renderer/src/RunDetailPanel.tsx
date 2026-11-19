@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 
 import RunStepContextJson from "./RunStepContextJson";
 import RunStepResponsePreview from "./RunStepResponsePreview";
-import { formatRunAssertionParts } from "./runDetailAssertions";
+import { assertionTableCells } from "./runDetailAssertions";
 
 type RunSummaryView = {
   id?: string;
@@ -218,50 +218,62 @@ export default function RunDetailPanel({ summary: rawSummary, steps: rawSteps, p
                     {(step.assertions?.length ?? 0) > 0 ? (
                       <div className="run-detail-block">
                         <h4 className="run-detail-block-title">断言</h4>
-                        <ul className="run-detail-assertions">
+                        <div
+                          className="run-detail-assertions-table-wrap"
+                          role="table"
+                          aria-label="断言结果"
+                        >
+                          <div className="run-detail-assertions-table-head" role="row">
+                            <span role="columnheader">项</span>
+                            <span role="columnheader">期望</span>
+                            <span role="columnheader">实际</span>
+                            <span role="columnheader" className="run-detail-assertions-col-result">
+                              结果
+                            </span>
+                          </div>
                           {(step.assertions ?? []).map((a, ai) => {
-                            const { key, parts } = formatRunAssertionParts(a);
+                            const cells = assertionTableCells(a);
                             return (
-                              <li
+                              <div
                                 key={ai}
-                                className={`run-detail-assertion${a.ok ? " run-detail-assertion--ok" : " run-detail-assertion--fail"}`}
+                                role="row"
+                                className={`run-detail-assertions-table-row${
+                                  a.ok ? " run-detail-assertions-table-row--ok" : " run-detail-assertions-table-row--fail"
+                                }`}
                               >
-                                <span className="run-detail-assertion-mark">{a.ok ? "✓" : "✗"}</span>
-                                <span className="run-detail-assertion-line">
-                                  <span className="run-detail-assertion-key">{key}</span>
-                                  {parts.length > 0 ? (
-                                    <span
-                                      className={`run-detail-assertion-expr${
-                                        a.ok ? "" : " run-detail-assertion-expr--fail"
-                                      }`}
-                                    >
-                                      :{" "}
-                                      {parts.map((p, pi) =>
-                                        p.kind === "actual" ? (
-                                          <span key={pi} className="run-detail-assertion-val">
-                                            {p.text}
-                                          </span>
-                                        ) : (
-                                          <span key={pi}>{p.text}</span>
-                                        ),
-                                      )}
-                                    </span>
-                                  ) : null}
+                                <span className="run-detail-assertions-label" role="cell">
+                                  {cells.label}
                                 </span>
-                              </li>
+                                <span className="run-detail-assertions-expect" role="cell">
+                                  {cells.expect}
+                                </span>
+                                <span
+                                  className={`run-detail-assertions-actual${
+                                    a.ok ? "" : " run-detail-assertions-actual--fail"
+                                  }`}
+                                  role="cell"
+                                >
+                                  {cells.actual}
+                                </span>
+                                <span className="run-detail-assertions-result" role="cell">
+                                  <span
+                                    className={`run-detail-assertions-mark${a.ok ? " run-detail-assertions-mark--ok" : " run-detail-assertions-mark--fail"}`}
+                                    aria-hidden
+                                  >
+                                    {a.ok ? "✓" : "✗"}
+                                  </span>
+                                </span>
+                              </div>
                             );
                           })}
-                        </ul>
+                        </div>
                       </div>
                     ) : null}
                     {assertionFail.length === 0 && step.status === "failed" ? (
                       <p className="hint run-detail-assertion-warn">未记录断言明细，请查看响应</p>
                     ) : null}
                     {step.response?.body_preview ? (
-                      <div className="run-detail-block">
-                        <h4 className="run-detail-block-title">响应预览</h4>
-                        <RunStepResponsePreview bodyPreview={step.response.body_preview} />
-                      </div>
+                      <RunStepResponsePreview bodyPreview={step.response.body_preview} />
                     ) : null}
                     <RunStepContextJson step={step as Record<string, unknown>} />
                   </div>

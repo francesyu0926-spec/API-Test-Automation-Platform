@@ -19,7 +19,7 @@ import { persistCaseAuthFromCapture } from "./samplerAuth";
 
 const CAPTURE_CASE_ENV = "dev";
 import { captureTxToDraft } from "./apiWorkbenchModel";
-import { buildBatchCaseRows } from "./captureBatchCases";
+import { buildBatchCaseRows, type BatchCaseRow } from "./captureBatchCases";
 import { captureTxToCaseMeta, captureTxToCaseYaml } from "./caseYaml";
 import { transactionToCurl } from "./captureCurl";
 import { filterTransactions, isCaptureSelfTestRow } from "./captureFilters";
@@ -29,7 +29,9 @@ import {
   asCaptureTransaction,
   captureBodyImageSrc,
   estimateBodyBytes,
+  bodyTextLooksLikeJson,
   formatCaptureBodyText,
+  formatCaptureHeaders,
   headerEntries,
   pickContentType,
   responseStatusTone,
@@ -37,6 +39,7 @@ import {
 } from "./captureTransactionView";
 import { httpStatusTone } from "./apiWorkbenchModel";
 import type { WorkbenchDraft } from "../../shared/apiWorkbenchTypes";
+import CaptureCodeBlock from "./CaptureCodeBlock";
 
 const pacHostsStorageKey = (projectId: string) => `atp-capture-pac-hosts:${projectId || "_"}`;
 const PAC_HOSTS_PLACEHOLDER = "api.example.com,api.yourcorp.com";
@@ -180,9 +183,12 @@ export default function CapturePanel({
   });
   const [sessionsDeleteOpen, setSessionsDeleteOpen] = useState(false);
   const [trafficLoading, setTrafficLoading] = useState(false);
+  const [trafficIndexReady, setTrafficIndexReady] = useState(false);
   const [txDetailLoading, setTxDetailLoading] = useState(false);
   const [checkedTxIds, setCheckedTxIds] = useState<Set<string>>(() => new Set());
   const [batchSaveOpen, setBatchSaveOpen] = useState(false);
+  const [batchSaveRows, setBatchSaveRows] = useState<BatchCaseRow[]>([]);
+  const [batchSavePreparing, setBatchSavePreparing] = useState(false);
   const [batchSaving, setBatchSaving] = useState(false);
   const [detailTab, setDetailTab] = useState<CaptureDetailTab>("response");
   const [captureHelpOpen, setCaptureHelpOpen] = useState(false);
@@ -382,7 +388,7 @@ export default function CapturePanel({
           failed += 1;
           continue;
         }
-        const yaml = captureTxToCaseYaml(tx);
+        const yaml = item.yaml.trim() || captureTxToCaseYaml(tx);
         await persistCaseAuthFromCapture(opts.projectId, CAPTURE_CASE_ENV, tx);
         const res = await window.atp.saveProjectCase(opts.projectId, caseName, yaml, {
           addToSuite: opts.addToSuite ? opts.suiteName : undefined,
@@ -443,7 +449,7 @@ export default function CapturePanel({
     }
     return {
       title: "本会话暂无记录",
-      hint: "该会话尚未写入流量，或已被清空列表。可重新开始抓包并操作目标应用。",
+      hint: "该会话尚未写入流量，请在目标客户端操作，或点击右上角【开始抓包】。",
       action: "startCapture" as const,
     };
   }, [
@@ -457,6 +463,10 @@ export default function CapturePanel({
     capturing,
     activeSessionId,
   ]);
+
+  const trafficListEmpty = visibleTransactions.length === 0;
+  const showTrafficListLoading = trafficLoading && !(trafficIndexReady && trafficListEmpty);
+  const showTrafficListEmpty = trafficListEmpty && !!emptyListState && trafficIndexReady;
 
   const refreshSessions = useCallback(async () => {
     if (!project) return;
@@ -472,6 +482,7 @@ export default function CapturePanel({
     setTxPage(1);
     setPendingNewTxCount(0);
     visibleListLenRef.current = 0;
+    setTrafficIndexReady(false);
   }, [activeSessionId, apiOnlyFilter]);
 
   useEffect(() => {
@@ -512,6 +523,7 @@ export default function CapturePanel({
       const sid = activeSessionId;
       if (!project || !sid) {
         setTransactions([]);
+        setTrafficIndexReady(true);
         return;
       }
       if (!opts?.silent) setTrafficLoading(true);
@@ -523,6 +535,7 @@ export default function CapturePanel({
         console.error("getCaptureIndex failed", err);
         if (!opts?.silent) setMessage("加载流量列表失败，请停止抓包后重试");
       } finally {
+        setTrafficIndexReady(true);
         if (!opts?.silent) setTrafficLoading(false);
       }
     },
@@ -705,6 +718,30 @@ export default function CapturePanel({
     window.setTimeout(() => setDetailToast(""), 2800);
   };
 
+  const openBatchSaveDialog = async () => {
+    if (!batchCaseRows.length) return;
+    const sid = activeSessionId;
+    if (!project?.trim() || !sid) {
+      showDetailToast("请先选择会话并勾选流量");
+      return;
+    }
+    setBatchSavePreparing(true);
+    try {
+      const enriched = await Promise.all(
+        batchCaseRows.map(async (r) => {
+          const tx = await window.atp.getCaptureTransaction(project, sid, r.txId);
+          return { ...r, yaml: tx ? captureTxToCaseYaml(tx) : "" };
+        }),
+      );
+      setBatchSaveRows(enriched);
+      setBatchSaveOpen(true);
+    } catch {
+      showDetailToast("加载 YAML 草案失败");
+    } finally {
+      setBatchSavePreparing(false);
+    }
+  };
+
   const copyCurl = async () => {
     if (!draftCurl) return;
     try {
@@ -839,19 +876,34 @@ export default function CapturePanel({
               <div className="capture-status-badges" aria-label="运行状态">
                 <CaptureStatusBadge running={ingest.running} onLabel="Ingest 运行中" offLabel="Ingest 已关闭" />
                 <CaptureStatusBadge running={mitm.running} onLabel="MITM 运行中" offLabel="MITM 已关闭" />
-                <CaptureStatusBadge running={sysProxy.enabled} onLabel={proxyEnabledLabel} offLabel="代理已关闭" />
+                <CaptureStatusBadge
+                  running={sysProxy.enabled}
+                  onLabel={proxyEnabledLabel}
+                  offLabel="代理已关闭"
+                  hint={
+                    capturing && proxyMode === "global"
+                      ? "全局代理下部分客户端易白屏，建议停止后改用 PAC（按域名）。"
+                      : proxyStale
+                        ? "系统代理已残留，客户端可能一直 Connecting。"
+                        : undefined
+                  }
+                />
               </div>
-              <span className="capture-head-aside-divider" aria-hidden />
-              <button
-                type="button"
-                className={`capture-emergency-restore capture-emergency-restore--secondary${proxyStale ? " capture-emergency-restore--urgent" : ""}`}
-                disabled={busy}
-                title="白屏或 Connecting 时关闭残留系统代理"
-                onClick={() => void onRestoreNetwork()}
-              >
-                <CaptureRestoreNetIcon />
-                仅恢复上网
-              </button>
+              {proxyStale || (sysProxy.enabled && !capturing) ? (
+                <>
+                  <span className="capture-head-aside-divider" aria-hidden />
+                  <button
+                    type="button"
+                    className={`capture-emergency-restore capture-emergency-restore--secondary${proxyStale ? " capture-emergency-restore--urgent" : ""}`}
+                    disabled={busy}
+                    title="关闭残留系统代理（白屏或 Connecting 时使用）"
+                    onClick={() => void onRestoreNetwork()}
+                  >
+                    <CaptureRestoreNetIcon />
+                    仅恢复上网
+                  </button>
+                </>
+              ) : null}
             </div>
           </div>
           {captureHelpOpen ? (
@@ -1034,13 +1086,11 @@ export default function CapturePanel({
           ) : null}
         </div>
 
-        {(proxyStale || (capturing && proxyMode === "global")) && (
+        {proxyStale ? (
           <p className="capture-inline-alert">
-            {proxyStale
-              ? "系统代理仍开启但抓包未运行，客户端可能一直 Connecting。请点右上角「仅恢复上网」后完全退出客户端再开。"
-              : "全局代理下部分客户端易白屏，建议停止后改用 PAC 或内嵌网页模式。"}
+            系统代理仍开启但抓包未运行，客户端可能一直 Connecting。请点「仅恢复上网」后完全退出客户端再开。
           </p>
-        )}
+        ) : null}
 
         {controlMessage && !isCertInstallBannerMessage(controlMessage) ? (
           <CaptureControlMessage text={controlMessage} />
@@ -1121,6 +1171,7 @@ export default function CapturePanel({
             <button
               type="button"
               className="capture-new-tx-chip"
+              title="后台收到新流量，点击跳转到最新一页"
               onClick={() => {
                 setTxPage(txPageCount);
                 setPendingNewTxCount(0);
@@ -1159,18 +1210,18 @@ export default function CapturePanel({
           <button
             type="button"
             className="capture-icon-btn capture-icon-btn--clear-session"
-            disabled={busy || !activeSessionId}
-            title="清空当前会话内全部流量记录（保留会话目录，不可恢复）"
-            aria-label="清空当前会话记录"
+            disabled={busy || !activeSessionId || businessTxCount === 0}
+            title="清空当前会话列表（不可恢复）"
+            aria-label="清空当前会话列表"
             onClick={() => void onClearTransactions()}
           >
-            <CaptureSweepIcon />
+            <CaptureBroomIcon />
           </button>
           <button
             type="button"
             className="capture-icon-btn capture-icon-btn--delete-sessions"
             disabled={busy || !sessions.length}
-            title="打开对话框，勾选并删除历史抓包会话（不可恢复）"
+            title="删除历史抓包会话（垃圾桶）"
             aria-label="删除历史会话"
             onClick={() => onDeleteSessions()}
           >
@@ -1188,8 +1239,8 @@ export default function CapturePanel({
               <button
                 type="button"
                 className="primary"
-                disabled={busy || batchSaving || !activeSessionId}
-                onClick={() => setBatchSaveOpen(true)}
+                disabled={busy || batchSaving || batchSavePreparing || !activeSessionId}
+                onClick={() => void openBatchSaveDialog()}
               >
                 保存到项目用例
               </button>
@@ -1197,27 +1248,31 @@ export default function CapturePanel({
           ) : null}
           </div>
         </div>
-        <div className="loading-host capture-traffic-table-host">
-          <LoadingOverlay show={trafficLoading} label="加载流量…" />
+        <div
+          className={`loading-host capture-traffic-table-host${showTrafficListEmpty ? " capture-traffic-table-host--empty" : ""}`}
+        >
+          <LoadingOverlay show={showTrafficListLoading} label="加载流量…" />
           <table className="capture-traffic-table">
-            <thead>
-              <tr>
-                <th className="capture-tx-check-col">
-                  <input
-                    type="checkbox"
-                    aria-label="全选本页"
-                    checked={allPageChecked}
-                    disabled={!pageIds.length}
-                    onChange={togglePageSelection}
-                  />
-                </th>
-                <th>时间</th>
-                <th>方法</th>
-                <th>状态</th>
-                <th>Path</th>
-                <th>URL</th>
-              </tr>
-            </thead>
+            {!trafficListEmpty ? (
+              <thead>
+                <tr>
+                  <th className="capture-tx-check-col">
+                    <input
+                      type="checkbox"
+                      aria-label="全选本页"
+                      checked={allPageChecked}
+                      disabled={!pageIds.length}
+                      onChange={togglePageSelection}
+                    />
+                  </th>
+                  <th>时间</th>
+                  <th>方法</th>
+                  <th>状态</th>
+                  <th>Path</th>
+                  <th>URL</th>
+                </tr>
+              </thead>
+            ) : null}
             <tbody>
             {pagedTransactions.map((t) => {
               const checked = checkedTxIds.has(t.id);
@@ -1255,15 +1310,11 @@ export default function CapturePanel({
               </tr>
             );
             })}
-            {!visibleTransactions.length && emptyListState && (
+            {showTrafficListEmpty && emptyListState && (
               <tr className="capture-empty-row">
                 <td colSpan={6}>
-                  <div
-                    className={`capture-empty-state${emptyListState.action === "startCapture" ? " capture-empty-state--cta" : ""}`}
-                  >
-                    <div className="capture-empty-icon" aria-hidden>
-                      ∅
-                    </div>
+                  <div className="capture-empty-state">
+                    <CaptureEmptyListIcon />
                     <p className="capture-empty-title">{emptyListState.title}</p>
                     <p className="capture-empty-hint">{emptyListState.hint}</p>
                     {emptyListState.action === "clearSearch" && (
@@ -1284,17 +1335,6 @@ export default function CapturePanel({
                         显示全部流量
                       </button>
                     )}
-                    {emptyListState.action === "startCapture" && !capturing ? (
-                      <button
-                        type="button"
-                        className="primary capture-start-btn capture-empty-start-btn"
-                        disabled={busy || !project}
-                        onClick={() => void onStart()}
-                      >
-                        <CapturePlayIcon />
-                        开始抓包
-                      </button>
-                    ) : null}
                   </div>
                 </td>
               </tr>
@@ -1302,7 +1342,7 @@ export default function CapturePanel({
             </tbody>
           </table>
         </div>
-        {selectedCount === 0 ? (
+        {visibleTransactions.length > 0 && selectedCount === 0 ? (
           <p className="capture-table-foot-hint">勾选多条流量可批量保存为用例</p>
         ) : null}
         {visibleTransactions.length > 0 ? (
@@ -1313,7 +1353,7 @@ export default function CapturePanel({
                 <div className="capture-pagination-controls">
                   <button
                     type="button"
-                    className="nav-btn nav-btn--compact"
+                    className="nav-btn nav-btn--compact nav-btn--ghost capture-pagination-btn"
                     disabled={txPage <= 1}
                     onClick={() => setTxPage((p) => Math.max(1, p - 1))}
                   >
@@ -1324,7 +1364,7 @@ export default function CapturePanel({
                   </span>
                   <button
                     type="button"
-                    className="nav-btn nav-btn--compact"
+                    className="nav-btn nav-btn--compact nav-btn--ghost capture-pagination-btn"
                     disabled={txPage >= txPageCount}
                     onClick={() => setTxPage((p) => Math.min(txPageCount, p + 1))}
                   >
@@ -1354,6 +1394,7 @@ export default function CapturePanel({
               onOpenInWorkbench ? () => onOpenInWorkbench(captureTxToDraft(selectedTx)) : undefined
             }
             onSaveCase={() => setSaveCaseOpen(true)}
+            onNotify={showDetailToast}
           />
         </section>
       )}
@@ -1460,9 +1501,10 @@ export default function CapturePanel({
 
       <BatchSaveCasesDialog
         open={batchSaveOpen}
-        rows={batchCaseRows}
+        rows={batchSaveRows}
         saving={batchSaving}
         defaultProjectId={project || undefined}
+        onCopied={showDetailToast}
         onCancel={() => !batchSaving && setBatchSaveOpen(false)}
         onConfirm={(opts) => void runBatchSave(opts)}
       />
@@ -1704,10 +1746,12 @@ function CaptureStatusBadge({
   running,
   onLabel,
   offLabel,
+  hint,
 }: {
   running: boolean;
   onLabel: string;
   offLabel: string;
+  hint?: string;
 }) {
   return (
     <span
@@ -1715,6 +1759,17 @@ function CaptureStatusBadge({
     >
       <span className="capture-status-badge-dot" aria-hidden />
       {running ? onLabel : offLabel}
+      {hint ? (
+        <button
+          type="button"
+          className="capture-status-badge-hint"
+          title={hint}
+          aria-label={hint}
+          onClick={(e) => e.stopPropagation()}
+        >
+          ⚠
+        </button>
+      ) : null}
     </span>
   );
 }
@@ -1779,16 +1834,35 @@ function CaptureShieldIcon() {
   );
 }
 
-function CaptureSweepIcon() {
+/** 抓包列表空状态：极简雷达/扫描线框 */
+function CaptureEmptyListIcon() {
+  return (
+    <div className="capture-empty-icon" aria-hidden>
+      <svg className="capture-empty-icon-svg" viewBox="0 0 64 64" focusable="false">
+        <circle cx="32" cy="32" r="28" fill="none" stroke="currentColor" strokeWidth="1.25" opacity="0.35" />
+        <circle cx="32" cy="32" r="18" fill="none" stroke="currentColor" strokeWidth="1" opacity="0.28" />
+        <circle cx="32" cy="32" r="4" fill="currentColor" opacity="0.5" />
+        <path
+          d="M32 32 L32 8 A24 24 0 0 1 52 20 Z"
+          fill="currentColor"
+          opacity="0.12"
+          stroke="currentColor"
+          strokeWidth="1"
+          strokeLinejoin="round"
+        />
+        <path d="M32 4v8M32 52v8M4 32h8M52 32h8" stroke="currentColor" strokeWidth="1" opacity="0.2" />
+      </svg>
+    </div>
+  );
+}
+
+/** 清空列表（扫帚），与「删除会话」垃圾桶区分 */
+function CaptureBroomIcon() {
   return (
     <svg className="capture-toolbar-icon" viewBox="0 0 16 16" aria-hidden focusable="false">
       <path
         fill="currentColor"
-        d="M2 4.25h8.5v1H2v-1ZM2 7.25h6v1H2v-1ZM2 10.25h4v1H2v-1Z"
-      />
-      <path
-        fill="currentColor"
-        d="m11.2 9.1 3.2 3.2-1.4 1.4-3.2-3.2 1.4-1.4Zm.9-1.3 1.7-1.7a.75.75 0 0 1 1.06 0l2 2a.75.75 0 0 1 0 1.06l-1.7 1.7-3.06-3.06Z"
+        d="M3.5 12.25h4l-.65 2.5h-2.2l-.65-2.5Zm1.1-1h1.8L4.2 7.5h1.65l.55 3.75Zm3.2 1h1.85L8.25 5.5H6.6l1.2 6.75Zm4.55-9.5 1.5 1.5-4.9 4.9-1.5-1.5 4.9-4.9ZM12 2.9a1.1 1.1 0 0 1 1.55 0l.55.55a1.1 1.1 0 0 1 0 1.55l-.5.5-2.1-2.1.5-.5Z"
       />
     </svg>
   );
@@ -1827,6 +1901,7 @@ function CaptureTxDetail({
   onCopyResponseBody,
   onOpenInWorkbench,
   onSaveCase,
+  onNotify,
 }: {
   tx: unknown;
   detailTab: CaptureDetailTab;
@@ -1838,6 +1913,7 @@ function CaptureTxDetail({
   onCopyResponseBody: () => void;
   onOpenInWorkbench?: () => void;
   onSaveCase: () => void;
+  onNotify?: (message: string) => void;
 }) {
   const parsed = asCaptureTransaction(tx);
   const resp = parsed?.response;
@@ -1874,9 +1950,11 @@ function CaptureTxDetail({
                   HTTP {status}
                 </span>
                 {durationMs != null ? (
-                  <span className="capture-meta-chip capture-meta-chip--muted">耗时 {Math.round(durationMs)} ms</span>
+                  <span className="capture-meta-chip capture-meta-chip--timing">
+                    耗时 {Math.round(durationMs)} ms
+                  </span>
                 ) : null}
-                {respCt ? <span className="capture-meta-chip capture-meta-chip--muted">{respCt}</span> : null}
+                {respCt ? <span className="capture-meta-chip capture-meta-chip--ctype">{respCt}</span> : null}
                 {respBytes != null && detailTab === "response" ? (
                   <span className="capture-meta-chip capture-meta-chip--muted">{respBytes} B</span>
                 ) : null}
@@ -1887,25 +1965,40 @@ function CaptureTxDetail({
           </div>
         </div>
         <div className="capture-detail-actions">
-          {detailTab === "response" ? (
-            <button type="button" className="nav-btn nav-btn--compact" onClick={onCopyResponseBody}>
-              复制 Body
-            </button>
-          ) : null}
-          <button type="button" className="nav-btn nav-btn--compact" onClick={onCopyCurl}>
-            复制 cURL
-          </button>
-          <button type="button" className="nav-btn nav-btn--compact" onClick={onDownloadCurl}>
-            下载脚本
-          </button>
           {onOpenInWorkbench ? (
-            <button type="button" className="primary nav-btn--compact" onClick={onOpenInWorkbench}>
+            <button
+              type="button"
+              className="primary nav-btn--compact capture-detail-btn-primary"
+              onClick={onOpenInWorkbench}
+            >
               在工作台打开
             </button>
           ) : null}
-          <button type="button" className="nav-btn nav-btn--compact" onClick={onSaveCase}>
-            保存为用例
-          </button>
+          <div className="capture-detail-actions-more" role="group" aria-label="更多操作">
+            {detailTab === "response" ? (
+              <button type="button" className="nav-btn nav-btn--compact nav-btn--ghost" onClick={onCopyResponseBody}>
+                复制 Body
+              </button>
+            ) : null}
+            {detailTab !== "curl" ? (
+              <button type="button" className="nav-btn nav-btn--compact nav-btn--ghost" onClick={onCopyCurl}>
+                复制 cURL
+              </button>
+            ) : null}
+            <button type="button" className="nav-btn nav-btn--compact nav-btn--ghost" onClick={onSaveCase}>
+              保存为用例
+            </button>
+            <details className="capture-detail-more">
+              <summary className="capture-detail-more-summary" aria-label="更多操作">
+                ⋯
+              </summary>
+              <div className="capture-detail-more-menu">
+                <button type="button" className="capture-detail-more-item" onClick={onDownloadCurl}>
+                  下载脚本
+                </button>
+              </div>
+            </details>
+          </div>
         </div>
       </div>
 
@@ -1932,6 +2025,7 @@ function CaptureTxDetail({
             ws={ws}
             payloadView={payloadView}
             onPayloadView={setPayloadView}
+            onNotify={onNotify}
           />
         )}
 
@@ -1943,39 +2037,147 @@ function CaptureTxDetail({
             body={parsed?.request?.body}
             payloadView={payloadView}
             onPayloadView={setPayloadView}
+            onNotify={onNotify}
           />
         )}
 
-        {detailTab === "curl" && <pre className="capture-scroll-block capture-scroll-block--curl">{draftCurl}</pre>}
+        {detailTab === "curl" && (
+          <CaptureCodeBlock
+            fullText={draftCurl}
+            language="curl"
+            maxHeight="min(36vh, 320px)"
+            ariaLabel="cURL"
+            onCopied={onNotify}
+          />
+        )}
 
-        {detailTab === "yaml" && <DraftYaml draft={draftYaml} />}
+        {detailTab === "yaml" && <DraftYaml draft={draftYaml} onCopied={onNotify} />}
 
         {detailTab === "raw" && (
-          <pre className="capture-scroll-block capture-scroll-block--mono">{JSON.stringify(tx, null, 2)}</pre>
+          <CaptureCodeBlock
+            fullText={JSON.stringify(tx, null, 2)}
+            language="json"
+            collapseHeaderKeys
+            ariaLabel="完整 JSON"
+            onCopied={onNotify}
+          />
         )}
       </div>
     </div>
   );
 }
 
-function CaptureHeaderTable({ headers }: { headers?: Record<string, string> }) {
+async function captureCopyText(text: string, onNotify?: (message: string) => void) {
+  try {
+    await window.atp.copyText(text);
+    onNotify?.("已复制到剪贴板");
+  } catch {
+    try {
+      await navigator.clipboard.writeText(text);
+      onNotify?.("已复制到剪贴板");
+    } catch {
+      onNotify?.("复制失败");
+    }
+  }
+}
+
+function CaptureHeaderTable({
+  headers,
+  onNotify,
+}: {
+  headers?: Record<string, string>;
+  onNotify?: (message: string) => void;
+}) {
   const rows = headerEntries(headers);
+  const [filter, setFilter] = useState("");
+  const q = filter.trim().toLowerCase();
+  const visible = useMemo(
+    () => (q ? rows.filter(([k, v]) => `${k}: ${v}`.toLowerCase().includes(q)) : rows),
+    [q, rows],
+  );
+
   if (!rows.length) {
     return <p className="capture-empty-hint">（无 Header）</p>;
   }
+
   return (
-    <div className="capture-headers-table-wrap">
-      <table className="capture-headers-table">
-        <tbody>
-          {rows.map(([k, v]) => (
-            <tr key={k}>
-              <th scope="row">{k}</th>
-              <td>{v}</td>
+    <div className="capture-headers-panel">
+      <div className="capture-headers-toolbar">
+        <label className="capture-headers-search">
+          <span className="capture-headers-search-icon" aria-hidden>
+            ⌕
+          </span>
+          <input
+            type="search"
+            className="capture-headers-search-input"
+            placeholder="筛选 Header"
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+            aria-label="筛选 Header"
+          />
+        </label>
+        <button
+          type="button"
+          className="nav-btn nav-btn--compact nav-btn--ghost capture-headers-copy-all"
+          onClick={() => void captureCopyText(formatCaptureHeaders(headers), onNotify)}
+        >
+          复制全部
+        </button>
+      </div>
+      <div className="capture-headers-table-wrap capture-scroll-slim">
+        <table className="capture-headers-table">
+          <thead>
+            <tr>
+              <th scope="col">Key</th>
+              <th scope="col">Value</th>
+              <th className="capture-headers-table-actions-col" aria-hidden />
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {visible.length ? (
+              visible.map(([k, v], i) => (
+                <tr key={`${k}-${i}`}>
+                  <th scope="row">
+                    <span className="capture-headers-key">{k}</span>
+                  </th>
+                  <td>
+                    <span className="capture-headers-val">{v}</span>
+                  </td>
+                  <td className="capture-headers-table-actions">
+                    <button
+                      type="button"
+                      className="capture-headers-row-copy"
+                      title="复制此行"
+                      aria-label={`复制 ${k}`}
+                      onClick={() => void captureCopyText(`${k}: ${v}`, onNotify)}
+                    >
+                      <CaptureHeaderCopyIcon />
+                    </button>
+                  </td>
+                </tr>
+              ))
+            ) : (
+              <tr>
+                <td colSpan={3} className="capture-headers-empty-filter">
+                  无匹配「{filter.trim()}」的 Header
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
     </div>
+  );
+}
+
+function CaptureHeaderCopyIcon() {
+  return (
+    <svg viewBox="0 0 16 16" width={14} height={14} aria-hidden focusable="false">
+      <path
+        fill="currentColor"
+        d="M5.5 2.75A1.25 1.25 0 0 1 6.75 1.5h5.5A1.25 1.25 0 0 1 13.5 2.75V9.5A1.25 1.25 0 0 1 12.25 10.75h-1.1v.5A1.25 1.25 0 0 1 9.9 12.5h-5.5A1.25 1.25 0 0 1 3.15 11.25V4.5A1.25 1.25 0 0 1 4.4 3.25h1.1v-.5Zm1.25 0v.5h5.5V2.75h-5.5ZM4.4 4.5v6.75h5.5V4.5H4.4Z"
+      />
+    </svg>
   );
 }
 
@@ -1987,6 +2189,7 @@ function CapturePayloadPane({
   ws,
   payloadView,
   onPayloadView,
+  onNotify,
 }: {
   method?: string;
   url?: string;
@@ -1995,11 +2198,13 @@ function CapturePayloadPane({
   ws?: { from_client?: boolean; type?: string; body?: string };
   payloadView: "body" | "headers";
   onPayloadView: (v: "body" | "headers") => void;
+  onNotify?: (message: string) => void;
 }) {
   const contentType = pickContentType(headers);
   const imageMime = sniffImageMime(body, headers);
   const bodyText = ws?.body ?? formatCaptureBodyText(body, headers);
   const imageSrc = !ws?.body ? captureBodyImageSrc(headers, body) : null;
+  const bodyIsJson = bodyTextLooksLikeJson(bodyText, contentType);
 
   return (
     <div className="capture-payload-pane">
@@ -2041,7 +2246,7 @@ function CapturePayloadPane({
       </div>
 
       {payloadView === "headers" ? (
-        <CaptureHeaderTable headers={headers} />
+        <CaptureHeaderTable headers={headers} onNotify={onNotify} />
       ) : imageSrc ? (
         <div className="capture-image-preview">
           <img src={imageSrc} alt={contentType ?? imageMime ?? "响应图片"} />
@@ -2050,17 +2255,27 @@ function CapturePayloadPane({
       ) : imageMime ? (
         <p className="capture-empty-hint">{bodyText}</p>
       ) : (
-        <pre className="capture-scroll-block capture-scroll-block--mono">{bodyText}</pre>
+        <CaptureCodeBlock
+          fullText={bodyText}
+          language={bodyIsJson ? "json" : "plain"}
+          collapseHeaderKeys={bodyIsJson}
+          maxHeight="min(42vh, 380px)"
+          ariaLabel="Body"
+          onCopied={onNotify}
+        />
       )}
     </div>
   );
 }
 
-function DraftYaml({ draft }: { draft: string }) {
+function DraftYaml({ draft, onCopied }: { draft: string; onCopied?: (message: string) => void }) {
   return (
-    <div>
-      <h4 className="sub-title">用例草案（YAML）</h4>
-      <pre>{draft}</pre>
-    </div>
+    <CaptureCodeBlock
+      fullText={draft}
+      language="yaml"
+      maxHeight="min(48vh, 420px)"
+      ariaLabel="用例 YAML"
+      onCopied={onCopied}
+    />
   );
 }

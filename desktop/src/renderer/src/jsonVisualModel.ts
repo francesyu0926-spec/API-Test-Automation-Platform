@@ -13,6 +13,16 @@ export function isRecord(value: unknown): value is Record<string, unknown> {
 
 export type FlatColumn = { path: string; header: string };
 
+export function inferColumnCellKind(rows: Record<string, unknown>[], path: string): "num" | "text" {
+  for (const row of rows) {
+    const v = getAtPath(row, path);
+    if (v === null || v === undefined) continue;
+    if (typeof v === "number" || typeof v === "boolean") return "num";
+    return "text";
+  }
+  return "text";
+}
+
 export function getAtPath(obj: unknown, path: string): unknown {
   if (!path) return obj;
   let cur: unknown = obj;

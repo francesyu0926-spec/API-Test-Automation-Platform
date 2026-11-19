@@ -169,6 +169,11 @@ export default function App() {
   }, [refreshProjects, refreshRuns, notify]);
 
   useEffect(() => {
+    if (tab !== "runs") return;
+    void refreshRuns();
+  }, [tab, refreshRuns]);
+
+  useEffect(() => {
     const atp = window.atp;
     if (!atp?.ensureNetworkDirect) return;
     void atp.ensureNetworkDirect().then((r) => {
@@ -654,7 +659,6 @@ export default function App() {
               <RunsHistoryTable
                 runs={runs}
                 projects={projects.map((p) => ({ id: p.id, name: p.name }))}
-                scopeProjectId={selectedProject || null}
                 selectedRunId={selectedRunId}
                 onSelect={(id) => void openRun(id)}
                 onClearSelection={clearRunSelection}

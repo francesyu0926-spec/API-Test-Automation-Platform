@@ -47,6 +47,17 @@ function sessionIdShortHash(sessionId: string): string {
   return sessionId.slice(dash + 1, dash + 9);
 }
 
+function CaptureTrashIcon() {
+  return (
+    <svg className="capture-session-btn-icon" viewBox="0 0 16 16" aria-hidden focusable="false">
+      <path
+        fill="currentColor"
+        d="M5.5 1.75a.75.75 0 0 1 .75-.75H9.75a.75.75 0 0 1 .75.75V3h3.25a.75.75 0 0 1 0 1.5h-.38l-.83 9.2A1.5 1.5 0 0 1 11.08 15H4.92a1.5 1.5 0 0 1-1.49-1.3l-.83-9.2H2.5a.75.75 0 0 1 0-1.5H5.5V1.75Zm2 .75v.5h1.5V2.5H7.5ZM4.5 4.5l.78 8.6a.25.25 0 0 0 .24.22h5.16a.25.25 0 0 0 .24-.22l.78-8.6H4.5Z"
+      />
+    </svg>
+  );
+}
+
 function CaptureSessionLockIcon() {
   return (
     <svg className="capture-session-lock-icon" viewBox="0 0 16 16" aria-hidden>
@@ -123,7 +134,7 @@ export default function CaptureSessionsDialog({
   return (
     <div className="modal-overlay" role="presentation">
       <div
-        className="modal-card modal-card--wide"
+        className="modal-card modal-card--wide capture-sessions-dialog"
         role="dialog"
         aria-labelledby="capture-sessions-title"
         onMouseDown={(e) => e.stopPropagation()}
@@ -188,8 +199,15 @@ export default function CaptureSessionsDialog({
             })}
           </ul>
         </div>
-        <div className="modal-actions">
-          <button type="button" className="modal-btn-cancel" onClick={onCancel}>
+        <div className="modal-actions capture-sessions-dialog-actions">
+          <button
+            type="button"
+            className="modal-btn-cancel capture-sessions-dialog-cancel"
+            onClick={onCancel}
+          >
+            <span className="capture-sessions-dialog-cancel-icon" aria-hidden>
+              ×
+            </span>
             取消
           </button>
           <button
@@ -198,6 +216,7 @@ export default function CaptureSessionsDialog({
             disabled={busy || picked.size === 0}
             onClick={() => onConfirm([...picked])}
           >
+            <CaptureTrashIcon />
             {deleteBtnLabel}
           </button>
         </div>
