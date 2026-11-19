@@ -12,6 +12,8 @@ captures/
 desktop/node_modules/
 desktop/out/
 desktop/dist/
+desktop/release/
+desktop/pack-staging/
 
 # Python
 __pycache__/

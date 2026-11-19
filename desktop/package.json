@@ -7,6 +7,8 @@
   "scripts": {
     "dev": "electron-vite dev",
     "build": "electron-vite build",
+    "pack:stage": "powershell -ExecutionPolicy Bypass -File ./scripts/prepare-platform-bundle.ps1",
+    "pack:win": "npm run build && npm run pack:stage && electron-builder --win --config electron-builder.yml",
     "preview": "electron-vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.node.json",
     "electron:install": "powershell -ExecutionPolicy Bypass -File ./scripts/install-electron-win.ps1"
@@ -29,6 +31,7 @@
     "@types/ws": "^8.18.2",
     "@vitejs/plugin-react": "^4.3.4",
     "electron": "^33.2.0",
+    "electron-builder": "^25.1.8",
     "electron-vite": "^2.3.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",

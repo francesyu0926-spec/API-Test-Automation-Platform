@@ -63,10 +63,19 @@ npm run electron:install
 
 可选环境变量 `ATP_REPO_ROOT` 指向平台仓库根目录（默认 `desktop` 的上一级）。
 
-打包：`npm run build`（输出在 `desktop/out/`）。
+开发构建：`npm run build`（输出在 `desktop/out/`）。
+
+**Windows 安装包 / 便携 exe**（在 `desktop` 目录）：
+
+```powershell
+npm install
+npm run pack:win
+```
+
+产物在 `desktop/release/`：`API Test Platform-0.1.0-x64.exe`（NSIS 安装包）与 `API Test Platform-0.1.0-portable-x64.exe`（免安装）。内置 `resources/platform/`（`atp`、`schemas`、`projects` 等，已排除 JMeter `run_*` 输出目录）。套件跑用例仍需本机 Python（可选在数据目录建 `.venv` 并 `pip install -r requirements.txt`）。
 
 桌面端模块划分、工作区与跨页面操作见 [docs/DESKTOP-UX.md](docs/DESKTOP-UX.md)。  
-**产品说明书（含界面截图）**见 [docs/PRODUCT-MANUAL.md](docs/PRODUCT-MANUAL.md)。
+**产品说明书（客户版，含截图）**：Markdown [docs/PRODUCT-MANUAL.md](docs/PRODUCT-MANUAL.md) · 可直接打开 [docs/PRODUCT-MANUAL.html](docs/PRODUCT-MANUAL.html) 或交付 [docs/PRODUCT-MANUAL.pdf](docs/PRODUCT-MANUAL.pdf)（约 1.3 MB）。
 
 ## 目录结构
 

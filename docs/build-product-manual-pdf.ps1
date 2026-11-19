@@ -27,4 +27,4 @@ if (-not (Test-Path $pdf)) {
   throw "PDF 生成失败"
 }
 
-Write-Host "已生成: $pdf"
+Write-Host "Generated: $pdf"

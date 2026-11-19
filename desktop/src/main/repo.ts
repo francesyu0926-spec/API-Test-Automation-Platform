@@ -27,9 +27,23 @@ function uniquePaths(paths: string[]): string[] {
   return out;
 }
 
+function bundledPlatformRoot(): string | null {
+  try {
+    if (!app.isPackaged) return null;
+    const root = path.join(process.resourcesPath, "platform");
+    if (hasAtpCliRoot(root)) return root;
+  } catch {
+    /* ignore */
+  }
+  return null;
+}
+
 /** Resolve platform repo root (contains atp/cli.py and projects/). */
 export function discoverRepoRootCandidates(mainDir?: string): string[] {
   const candidates: string[] = [];
+
+  const bundled = bundledPlatformRoot();
+  if (bundled) candidates.push(bundled);
 
   const fromEnv = process.env.ATP_REPO_ROOT;
   if (fromEnv?.trim()) candidates.push(fromEnv);

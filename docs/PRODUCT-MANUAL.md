@@ -1,343 +1,261 @@
-# API Test Platform 产品说明书
+# API 测试平台 · 使用说明书
 
-**版本**：桌面端 `api-test-automation-desktop@0.1.0`（Electron + React）  
-**适用对象**：接口测试、抓包回放、YAML 自动化回归、JMeter 压测  
-**数据形态**：纯文件仓库（无 SQLite），见 [FILE-STORE.md](./FILE-STORE.md)
-
----
-
-## 1. 产品定位
-
-API Test Platform（以下简称 **ATP**）是一套面向研发与测试的 **接口与压测工作台**，将以下能力整合在同一桌面应用中：
-
-| 能力 | 说明 |
-|------|------|
-| HTTP / WebSocket 调试 | Postman 风格集合、环境变量、无 CORS 限制的主进程请求 |
-| 流量抓包 | mitmproxy + WinHTTP/系统代理，支持桌面终端与内嵌 WebView |
-| 用例资产 | YAML 用例、套件、环境分层；可导出 JMX |
-| 自动化执行 | Python CLI 与桌面共用 `projects/`，产出 `runs/` 执行记录 |
-| 负载测试 | JMeter 式计划树 → 生成 JMX → 本机 JMeter → JTL/Dashboard → **压测历史** |
+**产品名称**：API Test Platform（桌面端）  
+**文档类型**：客户版 / 交付说明  
+**软件版本**：0.1.0  
+**适用读者**：测试工程师、接口联调人员、项目实施与运维支持（无需阅读源码即可上手）
 
 ---
 
-## 2. 系统架构
+## 1. 产品是什么
 
-```text
-┌─────────────────────────────────────────────────────────────┐
-│  Electron 桌面 (desktop/)                                    │
-│  React 界面 │ preload IPC │ 主进程 (文件、JMeter、抓包、PDF)   │
-└───────────────────────────┬─────────────────────────────────┘
-                            │ 读写仓库根目录 (ATP_REPO_ROOT)
-┌───────────────────────────▼─────────────────────────────────┐
-│  仓库根目录                                                    │
-│  projects/<id>/  cases, suites, environments, collections,    │
-│                  jmx/, perf/, captures/                       │
-│  runs/         执行索引与逐步明细                             │
-│  atp/          python -m atp.cli …                           │
-└─────────────────────────────────────────────────────────────┘
-```
+API 测试平台是一款 **Windows 桌面软件**，把日常最常用的接口与压测工作合在一个窗口里完成：
 
-**设计原则**（与 README 一致）：
+- **调试接口**：填写地址、参数、请求体，一键发送，查看响应（支持 JSON 表格化浏览与导出）。
+- **管理资产**：按「项目」整理环境配置、用例、接口集合。
+- **录制流量**：在受控代理下抓取真实请求，保存为用例或回到工作台继续编辑。
+- **压力测试**：用图形界面配置线程与 HTTP 请求，生成 JMeter 脚本、执行并查看报告与历史记录。
+- **自动化回归**：按套件批量执行用例，在执行记录里查看每一步是否通过。
 
-- 索引单写者、原子写、先明细后摘要  
-- 密钥仅放在 `environments/*.local.yaml` 或环境变量，不入 Git  
-- 桌面与 CLI **共用同一 `projects/`**，避免状态分裂  
+数据保存在本机文件夹中（**不上传云端数据库**），便于内网交付、备份与审计。
 
 ---
 
-## 3. 安装与启动
+## 2. 您将获得什么
 
-### 3.1 环境要求
-
-- Windows 10/11（当前主要适配平台；抓包含 WinHTTP `netsh` 逻辑）  
-- Node.js + `desktop/` 下 `npm install`  
-- Python 3 + `pip install -r requirements.txt`（套件执行、CLI）  
-- 可选：**JMeter 5.x**（`JMETER_HOME` 或界面填写安装目录）  
-- 可选：**mitmproxy**（`requirements-capture.txt`）  
-
-### 3.2 启动桌面端
-
-```powershell
-cd "D:\Document\AI LAB\API-Test-Automation-Platform\desktop"
-npm install
-npm run dev
-```
-
-- 仓库根默认 `desktop` 的上一级；可用环境变量 **`ATP_REPO_ROOT`** 覆盖。  
-- 安装/镜像问题见 [README.md](../README.md)、[ELECTRON.md](./ELECTRON.md)。  
+| 您想做的事 | 在软件里去哪里 |
+|------------|----------------|
+| 临时调一个 HTTP 接口 | **API 工作台**（快捷键 `Alt+1`） |
+| 把当前请求做成压测场景 | 工作台 → **发送到压测** → **负载测试** |
+| 跑 JMeter、看 JTL 曲线与表格 | **负载测试** → 执行 JMX / JTL 报告 |
+| 对比多次压测、导出 PDF 汇报 | **负载测试** → **压测历史** |
+| 抓桌面程序或浏览器的 API | **抓包**（`Alt+3`） |
+| 管理 YAML 用例、环境、集合 | **项目与用例**（`Alt+4`） |
+| 查看历史自动化运行结果 | **执行记录**（`Alt+5`） |
 
 ---
 
-## 4. 全局界面与操作习惯
+## 3. 安装与第一次打开
 
-### 4.1 工作区
+### 3.1 推荐：使用安装包（适合客户现场）
 
-- 左侧边栏顶部的 **项目** 下拉为全局上下文：`API 工作台`、`负载测试`、`抓包`、`执行记录` 等均按当前项目读写 `projects/<id>/`。  
-- 各模块顶栏 **环境**（如 `dev`）对应 `environments/<env>.yaml` 与 `*.local.yaml` 中的变量（含 token）。  
-- **`+ 项目`** 创建新项目后通常进入「项目与用例」。  
+在交付介质或构建目录中找到：
 
-### 4.2 导航分组与快捷键
+- **安装版**：`API Test Platform-0.1.0-x64.exe` — 按向导安装，可创建桌面快捷方式。  
+- **便携版**：`API Test Platform-0.1.0-portable-x64.exe` — 解压即用，适合 U 盘或临时环境。
 
-| 分组 | 模块 | 快捷键 | 说明 |
-|------|------|--------|------|
-| 开发与压测 | API 工作台 | `Alt+1` | 调试请求、集合、可视化响应 |
-| 开发与压测 | 负载测试 | `Alt+2` | JMX、JMeter、JTL、压测历史 |
-| 资产与流量 | 抓包 | `Alt+3` | MITM、保存用例 |
-| 资产与流量 | 项目与用例 | `Alt+4` | YAML、套件、批量 JMX |
-| 自动化 | 执行记录 | `Alt+5` | 历史 run、断言明细 |
+安装后双击 **「API Test Platform」** 启动。首次启动会加载内置项目模板；您也可以自己 **「+ 项目」** 新建。
 
-详见 [DESKTOP-UX.md](./DESKTOP-UX.md)。
+> **说明**：完整「套件自动化执行」和「抓包 MITM」需要本机另行安装 **Python**；纯工作台调试、负载测试（配好 JMeter）可不装 Python。详见 [第 9 节](#9-环境准备给实施人员)。
 
-### 4.3 跨模块数据流
+### 3.2 可选：指定数据目录
 
-```text
-抓包 / 用例 YAML ──► API 工作台（集合、环境）
-API 工作台 ──► 负载测试（draft + env + token）
-API 工作台 ──► cases/*.yaml
-python -m atp.cli run ◄── 项目与用例 / 执行记录
-JMeter 执行完成 ──► perf/*.json（压测历史）
-```
+默认使用安装目录下的平台数据。若需把用例与历史放到固定盘符（如 `D:\ATP-Data`），可设置 Windows 用户或系统环境变量：
+
+**`ATP_REPO_ROOT`** = 该文件夹的完整路径（文件夹内需能正常使用 `atp`、`projects` 等目录结构；安装版首次运行已自带一份，可复制后改写）。
 
 ---
 
-## 5. 模块说明（含界面截图）
+## 4. 三分钟快速入门
 
-### 5.1 API 工作台
+1. 启动软件，左上角 **项目** 下拉选择已有项目，或点 **「+ 项目」** 创建。  
+2. 左侧点 **「API 工作台」**，或按 **`Alt+1`**。  
+3. 选择请求方法（如 `GET`），填写 **URL**，需要时展开 **Params / Headers / Body**。  
+4. 顶栏选择 **环境**（如 `dev`），环境中的变量会自动替换 URL 里的 `{{变量名}}`。  
+5. 点击 **「发送」**，在下方查看状态码、耗时与响应内容。  
+6. 若响应是 JSON，切换到 **「可视化」**，可像表格一样浏览字段；需要汇报时点 **「导出 ▾」** 另存为 Excel 或图片。
 
-**功能摘要**：集合树、Send 请求、Params/Headers/Body、响应 Body/Headers/**可视化**表格、导入 cURL、保存到集合/保存为用例、**发送到压测**。
+![API 工作台：发起请求](images/product-manual/api-workbench-request.png)
 
-![API 工作台：请求与集合](images/product-manual/api-workbench-request.png)
+*图 1：选择集合中的接口、配置 URL 与环境后发送请求。*
 
-*图 5-1：选择集合中的接口，配置 POST URL，顶栏切换 `dev` 环境。*
+![API 工作台：JSON 可视化](images/product-manual/api-workbench-visual.png)
 
-![API 工作台：响应可视化](images/product-manual/api-workbench-visual.png)
-
-*图 5-2：`dayk` 接口 200 响应；「可视化」页签将 JSON 数组表格化，支持导出 XLSX/PNG。*
-
-| 操作 | 结果路径 / 行为 |
-|------|-----------------|
-| 保存到集合 | `projects/<id>/collections/*.json` |
-| 保存为用例 | `projects/<id>/cases/<name>.yaml`（`{{base_url}}`、断言等） |
-| 发送到压测 | 跳转负载测试，带入 URL/Headers/Body 与当前环境变量 |
-
-更多字段说明见 [API-WORKBENCH.md](./API-WORKBENCH.md)。
+*图 2：可视化视图支持勾选行后导出「所选」或导出「全部」数据。*
 
 ---
 
-### 5.2 负载测试
+## 5. 界面怎么理解
 
-负载测试页签顺序：**压测配置 → 执行 JMX → JTL 报告 → 压测历史**（末项带记录数角标）。执行成功后会自动归档并默认进入 **JTL 报告**。
+### 5.1 全局习惯
 
-#### 5.2.1 压测配置
+- **项目**：一切数据都属于某个项目（不同项目之间的用例、压测历史互不混用）。  
+- **环境**：同一项目下可有 `dev`、`test` 等；密钥请放在 `*.local.yaml`，勿外传。  
+- **左侧导航**：分为「开发与压测」「资产与流量」「自动化」三组，带数字快捷键。  
+- **通知条**：右下角短暂提示操作结果（保存成功、导出路径等）。
 
-对标 Apache JMeter：**测试计划 → 线程组 → HTTP 请求**；可从集合选择接口；支持线程数 / Ramp-Up / 循环等预设。
+### 5.2 导航一览
+
+| 快捷键 | 模块 | 一句话 |
+|--------|------|--------|
+| `Alt+1` | API 工作台 | 调试 HTTP / WebSocket，管理集合 |
+| `Alt+2` | 负载测试 | 配计划、跑 JMeter、看 JTL 与历史 |
+| `Alt+3` | 抓包 | 代理录制流量，保存用例 |
+| `Alt+4` | 项目与用例 | 环境与 YAML 用例、导出 JMX |
+| `Alt+5` | 执行记录 | 查看自动化运行历史与断言 |
+
+---
+
+## 6. 各模块怎么用（客户向）
+
+### 6.1 API 工作台
+
+**适合**：联调、排查、演示接口行为。
+
+**常用操作**：
+
+- **集合**：左侧树管理多接口；可导入 cURL，或 **保存到集合** / **保存为用例**。  
+- **响应**：Raw / Headers / **可视化**；大 JSON 中复杂字段可点开展开详情侧栏。  
+- **网络异常**：无法连接、证书错误时，界面会显示 **说明卡片**（非整屏乱码）；内网自签证书可在错误说明中尝试 **忽略证书校验** 后重发。  
+- **发送到压测**：当前 URL、头、体与环境变量一键带到 **负载测试** 配置页。
+
+### 6.2 负载测试
+
+页内从左到右四个步骤：**压测配置 → 执行 JMX → JTL 报告 → 压测历史**。
+
+**压测配置**  
+像简化版 JMeter：测试计划 → 线程组 → HTTP 请求。填好 URL 与并发参数后，点 **「生成 JMX 并执行」**（会跳到执行页并调用本机 JMeter）。
 
 ![压测配置](images/product-manual/loadtest-config.png)
 
-*图 5-3：计划树选中 HTTP 请求；右侧配置 URL、Body；可「生成 JMX 并执行」。*
+*图 3：在计划树中选中 HTTP 请求，右侧编辑 URL 与 Body。*
 
-生成 JMX 默认写入：`projects/<id>/jmx/loadtest-<时间戳>.jmx`。
-
-#### 5.2.2 执行 JMX
-
-选择本机 `.jmx` 与输出目录，检测 JMeter，支持 HTML Dashboard（`-e -o report`）、可选将 JMX 副本写入项目 `jmx/`。
+**执行 JMX**  
+选择本机 JMeter 安装目录、`.jmx` 文件与输出文件夹，查看实时日志。JMX 可存放在项目目录 `jmx/` 下便于版本管理。
 
 ![执行 JMX](images/product-manual/jmeter-run.png)
 
-*图 5-4：JMeter 路径、测试计划、输出目录与运行日志。*
+*图 4：配置 JMeter 路径与输出目录后运行。*
 
-#### 5.2.3 JTL 报告
-
-加载 `results.jtl` 或归档目录下的 JTL，查看统计表、延迟分布、状态码；可生成 JMX、写入压测历史。  
-**JTL 样本预览**与内置 HTTP 压测的 **请求样本** 表采用 **虚拟滚动**（`react-window`），避免一次挂载数万行 DOM。  
-JMeter 官方 **HTML Dashboard** 可在内嵌浏览器或独立目录打开：
+**JTL 报告**  
+打开 `results.jtl`，查看汇总、延迟分布、状态码；大文件采用流式解析，可在界面上选择解析深度。支持从 JTL **反向生成 JMX** 或写入 **压测历史**。
 
 ![JMeter Dashboard](images/product-manual/jmeter-dashboard.png)
 
-*图 5-5：Dashboard 示例（APDEX、请求汇总等）。*
+*图 5：可选打开 JMeter HTML 报告目录（APDEX、吞吐量等）。*
 
-历史行 **PDF** 在存在 JTL 时优先按 **JMeter Dashboard 风格** 再生 PDF，并在 Chromium 窗口中打开（缩放/搜索/打印）。
+**压测历史**  
+每次 JMX 或内置 HTTP 压测结束后，会生成一条记录，可：
 
-#### 5.2.4 压测历史
+- 单条 **PDF** 汇报（有 JTL 时按 Dashboard 风格生成）；  
+- 勾选多条 **合并导出 PDF**；  
+- 打开关联 **JMX** 再次执行。
 
-**按项目隔离**：记录保存在 `projects/<id>/perf/*.json`（同名 `.pdf` 可选）。无需先跑压测即可打开本页 **刷新** 列表。
+![压测历史列表](images/product-manual/loadtest-history-table.png)
 
-**列表列**（当前版本）：
+*图 6：按计划、接口、成功失败等列浏览；右上角可刷新、打开存档目录。*
 
-| 列 | 含义 |
-|----|------|
-| 时间 | 本地时区格式 `YYYY-MM-DD HH:mm:ss` |
-| 计划 | JMX 运行：计划文件名；HTTP 内置压测：用例名 |
-| 接口 | JMX：`JTL · 文件名`；HTTP：方法 + 路径 |
-| 样本 / 成功 / 失败 / 吞吐 | 汇总指标 |
-| 导出 | **PDF**（内嵌查看）、**JMX**、**摘要** |
+> **提示**：若列表为空，请先确认左上角 **项目** 是否与执行压测时一致；不同项目历史不共享。
 
-![压测历史：计划与接口分列](images/product-manual/loadtest-history-columns.png)
+### 6.3 抓包
 
-*图 5-6：计划与接口分为两列；样本/成功/失败独立列。*
+**适合**：终端 App、内嵌浏览器等难以手写请求的场景。
 
-![压测历史：完整列表](images/product-manual/loadtest-history-table.png)
+**推荐流程**：
 
-*图 5-7：多行 JMX 与 HTTP 混合记录；工具栏支持合并导出 PDF、删除所选、打开存档目录。*
+1. 按界面提示安装并信任 **MITM 根证书**（仅一次）。  
+2. 选择 **按域名代理（PAC）** 或全局模式，填写要录制的 API 主机名。  
+3. **开始抓包** → 完全退出并重启目标程序 → 操作业务。  
+4. 在列表中选中请求 → 打开工作台编辑，或 **批量保存为用例**。  
+5. 结束后 **停止抓包并恢复系统上网**，避免代理残留。
 
-**合并与预览**：勾选多条 → 可展开「合并预览」（聚合表、延迟分布、状态码图）→ **合并导出 PDF**。
+抓包能力依赖本机 **Python + mitmproxy**（见第 9 节）。
 
-![压测历史：合并预览](images/product-manual/loadtest-history-merge.png)
+### 6.4 项目与用例
 
-*图 5-8：选中多条后的统计表与合并分布图。*
+**适合**：正式资产沉淀与交付。
 
-**行内操作**：
+- 维护 **环境**（`dev.yaml` + 本地密钥文件）。  
+- 编辑 **YAML 用例**、**套件**（一批用例的组合）。  
+- 从集合或当前用例 **生成 JMX**，输出到 `projects/<项目名>/jmx/`。
 
-- **PDF**：强制按当前规则重生并打开 PDF 查看器。  
-- **JMX**：优先打开 provenance / `jmeter.log` / 项目 `jmx/` 下关联文件。  
-- **摘要**：弹窗展示文本摘要，可复制。
+### 6.5 执行记录
 
-![摘要弹窗](images/product-manual/loadtest-history-summary.png)
+**适合**：自动化回归后的验收。
 
-*图 5-9：行内「摘要」操作。*
-
-![PDF 导出](images/product-manual/loadtest-pdf-export.png)
-
-*图 5-10：行内 PDF 导出入口。*
-
-**按接口分组**：工具栏可切换「按执行 / 按接口」，用于跨多次运行对比同一端点。
-
-**空列表说明**：若当前项目 `perf/` 无文件，列表为空；压测数据在其它项目时，请在左上角 **切换项目**（例如 `terminal-sfccn` 与 `bidding` 互不共享历史）。
-
-![空项目压测历史](images/product-manual/loadtest-history-empty-project.png)
-
-*图 5-11：`bidding` 项目无 perf 记录时的空状态（需切换项目或在本项目执行 JMX）。*
+选择历史运行记录，查看摘要与各步骤的请求/响应、断言是否通过。可与命令行 `python -m atp.cli run` 结果一致（共用同一数据目录）。
 
 ---
 
-### 5.3 抓包
+## 7. 三个常见业务场景
 
-**功能摘要**：启停 MITM、PAC/全局代理模式、流量列表过滤、明细打开到工作台、批量 **保存到项目用例**。
+### 场景 A：从联调到压测报告（最常见）
 
-桌面客户端（WinHTTP）与浏览器分流策略见 [CAPTURE-DESKTOP-APP.md](./CAPTURE-DESKTOP-APP.md)；mitm 安装与 ingest 见 [CAPTURE-REAL-TRAFFIC.md](./CAPTURE-REAL-TRAFFIC.md)。
+1. 在 **API 工作台** 调通行情/下单等接口并保存集合。  
+2. **发送到压测** → 在 **压测配置** 调整线程数、Ramp-Up → **生成 JMX 并执行**。  
+3. 在 **JTL 报告** 确认错误率为 0 或达预期。  
+4. 在 **压测历史** 导出 **PDF**，作为测试报告附件。
 
-推荐流程简述：
+### 场景 B：抓包到回归用例
 
-1. 安装并信任 MITM 证书  
-2. 选 **PAC（按域名）**，填写 API 主机或「项目 PAC 模板」  
-3. **开始抓包** → 重启目标客户端 → 操作业务  
-4. 保存用例 / 在工作台编辑 → **停止并恢复上网**  
+1. **抓包** 录制一次真实业务流程。  
+2. 多选关键请求 **保存为用例**。  
+3. 在 **项目与用例** 纳入 `smoke` 套件。  
+4. 在 **执行记录** 或套件运行中定期执行，关注失败步骤。
 
----
+### 场景 C：已有 JMeter 脚本
 
-### 5.4 项目与用例
-
-管理 `project.yaml`、环境文件、YAML 用例、套件定义、API 集合引用。
-
-典型能力：
-
-- 编辑/运行套件目标用例列表  
-- **生成 JMX（全部）** 或单用例 JMX → `projects/<id>/jmx/`  
-- 将集合导入用例（与工作台联动）  
+1. 直接进入 **执行 JMX**，选择客户提供的 `.jmx`。  
+2. 运行完成后自动归档 JTL。  
+3. 在 **压测历史** 对比多次运行的吞吐与延迟，合并导出 PDF 给甲方。
 
 ---
 
-### 5.5 自动化：套件运行与执行记录
+## 8. 常见问题（客户向）
 
-**套件运行**（`suite` 相关界面，可由侧栏自动化入口进入）：选择套件 + 环境 → 调用 `python -m atp.cli run`，结果写入 `runs/<id>/`。
-
-**执行记录**：表格浏览历史 run（状态、时间、项目、套件）；点开查看 **summary** 与逐步 **steps** 断言。
-
-CLI 等价操作：
-
-```powershell
-python -m atp.cli run -p <project> -s <suite> -e dev
-python -m atp.cli runs list
-```
-
----
-
-## 6. 典型端到端场景
-
-### 场景 A：从调试到压测
-
-1. **API 工作台** 调通 `quote` 接口并保存到集合。  
-2. 点击 **发送到压测** → **压测配置** 调整线程组 → **生成 JMX 并执行**。  
-3. **JTL 报告** 查看结果；记录自动进入 **压测历史**。  
-4. 历史行 **PDF** 交付报告；**JMX** 另存复跑。  
-
-### 场景 B：抓包到回归
-
-1. **抓包** 录制终端流量 → 多选保存为用例。  
-2. **项目与用例** 纳入 `smoke` 套件。  
-3. **执行记录** 中跑套件并查看失败步骤。  
-
-### 场景 C：仅 JMeter 手工计划
-
-1. **执行 JMX** 选择外部或项目内 `.jmx`。  
-2. 完成后归档 JTL → **压测历史**。  
-3. 合并多次运行导出一份 PDF 对比。  
+| 问题 | 建议处理 |
+|------|----------|
+| 打开软件后没有项目 | 点 **「+ 项目」** 新建，或检查 `ATP_REPO_ROOT` 是否指向含 `projects` 的目录。 |
+| 发送请求一直失败 / 证书错误 | 看响应区 **错误卡片** 说明；内网 HTTPS 可尝试卡片中的证书校验选项后重发。 |
+| 压测历史是空的 | 确认 **当前项目** 与压测时一致；点 **刷新**；用 **打开存档目录** 查看是否有记录文件。 |
+| 导出 Excel/图片没反应 | 在 **可视化** 页签使用 **「导出 ▾」**；若系统拦截另存为，请选择有效文件夹（如「文档」）。 |
+| 另存为 JMX 报「位置不可用」 | 目标文件夹不存在；请在对话框中选现有目录（如桌面或项目 `jmx` 目录）。 |
+| JMeter 找不到 | 在 **执行 JMX** 页填写 **JMETER_HOME** 或安装路径，并确认本机已安装 JMeter 5.x。 |
+| 抓包没有流量 | 确认目标程序已重启；域名未误入「直连」列表；抓包结束后务必 **恢复代理**。 |
+| 套件执行按钮无反应 | 需安装 **Python** 与 `requirements.txt` 依赖，并在数据目录配置 `.venv`（见下节）。 |
+| 时间与北京时间差 8 小时 | 界面已按 **本机时区** 显示；若仍异常请重启软件后再看。 |
 
 ---
 
-## 7. 数据目录速查
+## 9. 环境准备（给实施人员）
+
+以下在 **客户内网部署** 时由实施同事一次性配置即可，不必写给最终业务用户。
+
+| 组件 | 用途 | 说明 |
+|------|------|------|
+| **API Test Platform 安装包** | 桌面主程序 | 见 `desktop/release/` 或交付光盘 |
+| **JMeter 5.x** | JMX 压测执行 | 配置 `JMETER_HOME` 或在界面填写 |
+| **Python 3.10+** | 套件执行、抓包 CLI | `pip install -r requirements.txt`；抓包另装 `requirements-capture.txt` |
+| **mitmproxy** | 抓包 | 随 capture 依赖安装；需信任根证书 |
+
+数据目录结构（便于备份）：
 
 ```text
-projects/<id>/
-  project.yaml
-  environments/       dev.yaml, dev.local.yaml（密钥）
-  cases/*.yaml
-  suites/*.yaml
-  collections/*.json
-  jmx/*.jmx           生成或导入的测试计划
-  jmx/run_*/          JMeter 输出（results.jtl、report/）
-  perf/*.json         压测历史主数据
-  perf/*.pdf          可选缓存 PDF
-  captures/           抓包会话（常 gitignore）
-
-runs/
-  index.json
-  <run-id>/summary.json, steps/
+projects/<项目名>/
+  environments/     环境与密钥（*.local.yaml 勿外传）
+  cases/            用例
+  collections/      接口集合
+  jmx/              压测脚本与输出
+  perf/             压测历史（JSON/PDF）
+  captures/         抓包会话
+runs/               自动化执行记录
 ```
 
----
-
-## 8. 常见问题（FAQ）
-
-| 现象 | 处理 |
-|------|------|
-| 压测历史为空 | 确认左上角项目是否正确；点 **刷新**；**打开存档目录** 看是否有 `*.json`；JMX 跑完后应自动写入 `perf/` |
-| 时间差 8 小时 | 已按 **本地时区** 显示 `startedAt`；刷新界面后应为本机时间 |
-| 历史 PDF 与 JTL 不一致 | 行内 PDF 会 **强制重生**；需存在 JTL 路径才会用 Dashboard 模板 |
-| 导出 JMX 失败 | JMX 记录会沿 JTL 目录、`jmeter.log`、项目 `jmx/` 搜寻；可先将 JMX 存入 `projects/<id>/jmx/` |
-| JTL 很大（数百 MB～GB） | 主进程 **按行流式解析**；在压测条件区选择 **JTL 解析** 模式：极速 800（默认）/ 标准 5000 / 深度 50000（分位数蓄水池） |
-| 前端样本表卡顿 | **JTL 样本预览**、**HTTP 压测请求样本** 使用 `react-window` **虚拟列表**（约 ≥48 行启用）；仅渲染可视区域 DOM，与解析模式上限（最多约 5 万条预览）匹配 |
-| P90/P95/P99 与 JMeter 略有差异 | 大文件下为 **流式蓄水池近似**；表头旁 **(i)** 悬停可见说明，属正常现象 |
-| 工作台加载超时 | 检查 `ATP_REPO_ROOT`、磁盘权限；见启动 toast |
-| 抓包无流量 | 勿把 API 域名放进「直连」；完全退出客户端后重开；见抓包文档 |
+更多技术约定见仓库内 `docs/FILE-STORE.md`、`README.md`（面向开发）。
 
 ---
 
-## 9. 相关文档索引
-
-| 文档 | 内容 |
-|------|------|
-| [README.md](../README.md) | 仓库总览、CLI 快速开始 |
-| [DESKTOP-UX.md](./DESKTOP-UX.md) | 桌面信息架构 |
-| [API-WORKBENCH.md](./API-WORKBENCH.md) | 工作台与压测配置说明 |
-| [FILE-STORE.md](./FILE-STORE.md) | 文件存储约定 |
-| [CAPTURE-DESKTOP-APP.md](./CAPTURE-DESKTOP-APP.md) | 桌面终端抓包 |
-| [CAPTURE-REAL-TRAFFIC.md](./CAPTURE-REAL-TRAFFIC.md) | mitm / ingest |
-| [ELECTRON.md](./ELECTRON.md) | 打包与 Electron 问题 |
-
----
-
-## 10. 文档修订
+## 10. 文档与版本
 
 | 日期 | 说明 |
 |------|------|
-| 2026-11-18 | 初版：基于当前桌面功能与仓库内实景截图编制 |
+| 2026-11-19 | 客户版：强调安装包、入门路径与业务场景；补充可视化导出与网络错误提示 |
+| 2026-11-18 | 初版技术说明书与截图 |
 
-截图存放路径：`docs/images/product-manual/`。在 Markdown 预览或 Git 托管中打开本文件即可与图片一并查看。
+**生成 PDF（可选）**：在 `docs` 目录执行 `.\build-product-manual-pdf.ps1`（需本机安装 [Pandoc](https://pandoc.org/) 与 Microsoft Edge），输出 `PRODUCT-MANUAL.pdf` 便于邮件发送。
 
-**PDF 版本**：[`PRODUCT-MANUAL.pdf`](./PRODUCT-MANUAL.pdf)（约 1.5 MB，含嵌入截图）。重新生成：
+**截图目录**：`docs/images/product-manual/`
 
-```powershell
-cd docs
-.\build-product-manual-pdf.ps1
-```
+---
+
+*本文档描述的是 API Test Platform 桌面端 0.1.0 功能；若界面与文字略有差异，以实际安装包为准。技术支持可附上项目名、环境名与操作步骤截图以便排查。*
