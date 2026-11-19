@@ -262,6 +262,8 @@ export function savedRequestToDraft(req: SavedApiRequest): WorkbenchDraft {
     body: req.body,
     bodyContentType:
       req.bodyContentType ?? contentTypeFromRows(headers) ?? inferBodyContentType(undefined, req.body),
+    preRequestScript: req.preRequestScript ?? "",
+    testScript: req.testScript ?? "",
   };
   return normalizeRawBodyDraft(draft);
 }
@@ -278,6 +280,8 @@ export function draftToSavedRequest(id: string, draft: WorkbenchDraft): SavedApi
     bodyMode: draft.bodyMode,
     body: draft.body,
     bodyContentType: draft.bodyContentType,
+    preRequestScript: draft.preRequestScript?.trim() || undefined,
+    testScript: draft.testScript?.trim() || undefined,
   };
 }
 

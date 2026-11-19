@@ -35,6 +35,8 @@ import {
 } from "./workbenchWsHint";
 import { applyImportedCurlAuth, coalesceAuthVariables, unresolvedWorkbenchVars } from "./samplerAuth";
 import CaptureCodeBlock from "./CaptureCodeBlock";
+import WorkbenchScriptEditor from "./WorkbenchScriptEditor";
+import WorkbenchScriptConsole from "./WorkbenchScriptConsole";
 import JsonResponseView, { type JsonResponseViewHandle } from "./JsonResponseView";
 import { countSelectedRows } from "./jsonVisualSelection";
 import { businessLoginHintFromBody, parseResponseJson } from "./parseResponseJson";
@@ -46,6 +48,11 @@ import {
   suggestExportBaseName,
 } from "./jsonVisualExport";
 import { saveBytesWithDialog } from "./saveBytesWithDialog";
+import {
+  runPreRequestScript,
+  runTestScript,
+  type WorkbenchScriptTest,
+} from "./workbenchScripts";
 import { WorkbenchGroupFolderIcon, WorkbenchSaveCollectionIcon } from "./workbenchMetaIcons";
 import WorkbenchTransportErrorCard from "./WorkbenchTransportErrorCard";
 import {
@@ -75,7 +82,8 @@ type Props = {
   applyToLoadTest?: boolean;
 };
 
-type ReqTab = "params" | "headers" | "body";
+type ReqTab = "params" | "headers" | "body" | "scripts";
+type ScriptPane = "prerequest" | "test";
 type Protocol = "http" | "ws";
 
 const HTTP_BODY_CONTENT_TYPES = [
@@ -133,6 +141,10 @@ export default function ApiWorkbench({
     externalDraft ? normalizeRawBodyDraft(externalDraft) : defaultDraft(),
   );
   const [reqTab, setReqTab] = useState<ReqTab>("params");
+  const [scriptPane, setScriptPane] = useState<ScriptPane>("prerequest");
+  const [scriptTests, setScriptTests] = useState<WorkbenchScriptTest[]>([]);
+  const [scriptLogs, setScriptLogs] = useState<string[]>([]);
+  const [scriptRunError, setScriptRunError] = useState<string | null>(null);
   const queryKvRef = useRef<WorkbenchKvTableHandle>(null);
   const headersKvRef = useRef<WorkbenchKvTableHandle>(null);
   const [kvBulkOpen, setKvBulkOpen] = useState(false);
@@ -150,7 +162,7 @@ export default function ApiWorkbench({
   const [visualExportMenuPos, setVisualExportMenuPos] = useState({ top: 0, right: 0 });
   const visualExportMenuBtnRef = useRef<HTMLButtonElement>(null);
   const jsonVisualRef = useRef<JsonResponseViewHandle>(null);
-  const [respView, setRespView] = useState<"body" | "headers">("body");
+  const [respView, setRespView] = useState<"body" | "headers" | "tests">("body");
   const [toast, setToast] = useState("");
   const [wsSwitchHint, setWsSwitchHint] = useState(false);
   const [pendingCollectionDelete, setPendingCollectionDelete] = useState(false);
@@ -698,17 +710,48 @@ export default function ApiWorkbench({
     }
     setSending(true);
     setResponse(null);
+    setScriptTests([]);
+    setScriptLogs([]);
+    setScriptRunError(null);
     setWsSwitchHint(false);
     if (resolvedUrlLooksLikeWs(draft)) {
       showToast("URL 像 WebSocket 行情通道；若 HTTP 返回 404，请切到 WS 后点 Connect");
     }
     try {
-      const payload = resolveWorkbenchPayload(draft, activeVars);
+      let sendDraft = draft;
+      let sendVars = { ...activeVars };
+      const logs: string[] = [];
+      if (draft.preRequestScript?.trim()) {
+        const pre = runPreRequestScript(draft, sendVars);
+        logs.push(...pre.logs.map((l) => `[Pre-request] ${l}`));
+        if (!pre.ok) {
+          setScriptRunError(pre.error ?? "Pre-request 脚本错误");
+          setScriptLogs(logs);
+          showToast(pre.error ?? "Pre-request 脚本错误", 4000);
+          return;
+        }
+        sendDraft = normalizeRawBodyDraft(pre.draft);
+        sendVars = { ...pre.variables };
+        setDraft(sendDraft);
+      }
+      const payload = resolveWorkbenchPayload(sendDraft, sendVars);
       const res = await window.atp.sendHttpRequest({
         ...payload,
         insecureTls: ignoreTlsInsecure || undefined,
       });
       setResponse(res);
+      let scriptTestCount = 0;
+      if (sendDraft.testScript?.trim()) {
+        const test = runTestScript(sendDraft, sendVars, res);
+        logs.push(...test.logs.map((l) => `[Tests] ${l}`));
+        setScriptTests(test.tests);
+        scriptTestCount = test.tests.length;
+        if (!test.ok) {
+          setScriptRunError(test.error ?? "Tests 脚本错误");
+        }
+      }
+      if (logs.length) setScriptLogs(logs);
+      if (logs.length > 0 || scriptTestCount > 0) setRespView("tests");
       if (shouldSuggestWsAfterHttp(res.status, payload.url, payload.method)) {
         setWsSwitchHint(true);
       }
@@ -1226,6 +1269,13 @@ export default function ApiWorkbench({
     (reqTab === "body" && protocol === "http" && draft.bodyMode === "none") ||
     ((reqTab === "params" || reqTab === "headers") && !kvBulkOpen && kvRowCount <= 4);
 
+  const scriptTabBadge = useMemo(() => {
+    let n = 0;
+    if (draft.preRequestScript?.trim()) n += 1;
+    if (draft.testScript?.trim()) n += 1;
+    return n;
+  }, [draft.preRequestScript, draft.testScript]);
+
   const bodyContentTypeOptions = useMemo(() => {
     const base = HTTP_BODY_CONTENT_TYPES.map((o) => ({ value: o.value, label: o.label }));
     const cur = draft.bodyContentType;
@@ -1570,6 +1620,10 @@ export default function ApiWorkbench({
           <div
             className={`workbench-editor-zone workbench-editor-zone--request${
               requestPaneCompact ? " workbench-editor-zone--request-compact" : ""
+            }${
+              reqTab === "scripts" && protocol === "http"
+                ? " workbench-editor-zone--request-expanded"
+                : ""
             }`}
           >
             <div className="workbench-req-tabs-bar">
@@ -1579,6 +1633,9 @@ export default function ApiWorkbench({
                     ["params", "Params"],
                     ["headers", `Headers (${headerCount})`],
                     ["body", protocol === "ws" ? "Message" : "Body"],
+                    ...(protocol === "http"
+                      ? ([["scripts", `Scripts${scriptTabBadge ? ` (${scriptTabBadge})` : ""}`]] as const)
+                      : []),
                   ] as const
                 ).map(([id, label]) => (
                   <button
@@ -1595,7 +1652,11 @@ export default function ApiWorkbench({
               </div>
             </div>
 
-            <div className="workbench-editor-pane">
+            <div
+              className={`workbench-editor-pane${
+                reqTab === "scripts" && protocol === "http" ? " workbench-editor-pane--scripts" : ""
+              }`}
+            >
               {reqTab === "params" && (
                 <WorkbenchKvTable
                   ref={queryKvRef}
@@ -1622,6 +1683,52 @@ export default function ApiWorkbench({
                   onBulkOpenChange={setKvBulkOpen}
                 />
               )}
+              {reqTab === "scripts" && protocol === "http" ? (
+                <div className="workbench-scripts-pane">
+                  <nav className="workbench-scripts-nav sidebar-nav sidebar-nav--fin" aria-label="脚本类型">
+                    <div className="sidebar-nav-group">
+                      <div className="nav-section nav-section--fin">脚本</div>
+                      <div className="sidebar-nav-items sidebar-nav-items--fin">
+                        <button
+                          type="button"
+                          className={`nav-btn nav-btn--module${
+                            scriptPane === "prerequest" ? " active" : ""
+                          }`}
+                          aria-current={scriptPane === "prerequest" ? "page" : undefined}
+                          onClick={() => setScriptPane("prerequest")}
+                        >
+                          <span className="nav-btn-label">Before request</span>
+                        </button>
+                        <button
+                          type="button"
+                          className={`nav-btn nav-btn--module${scriptPane === "test" ? " active" : ""}`}
+                          aria-current={scriptPane === "test" ? "page" : undefined}
+                          onClick={() => setScriptPane("test")}
+                        >
+                          <span className="nav-btn-label">After response</span>
+                        </button>
+                      </div>
+                    </div>
+                  </nav>
+                  <div className="workbench-scripts-editor">
+                    {scriptPane === "prerequest" ? (
+                      <WorkbenchScriptEditor
+                        ariaLabel="Before request 脚本"
+                        placeholder="// 在发送前动态设置变量、Header、URL…"
+                        value={draft.preRequestScript ?? ""}
+                        onChange={(v) => setDraft((d) => ({ ...d, preRequestScript: v }))}
+                      />
+                    ) : (
+                      <WorkbenchScriptEditor
+                        ariaLabel="After response 脚本"
+                        placeholder={'pm.test("Status is 200", function () {\n  pm.expect(pm.response.code).to.eql(200);\n});'}
+                        value={draft.testScript ?? ""}
+                        onChange={(v) => setDraft((d) => ({ ...d, testScript: v }))}
+                      />
+                    )}
+                  </div>
+                </div>
+              ) : null}
               {reqTab === "body" && (
                 <div
                   className={`workbench-body-pane${
@@ -1712,7 +1819,12 @@ export default function ApiWorkbench({
 
           <div
             className="workbench-editor-zone workbench-editor-zone--response workbench-response"
-            style={{ flex: "1 1 0", minHeight: responsePaneHeight }}
+            style={{
+              flex: "0 0 auto",
+              height: responsePaneHeight,
+              minHeight: 140,
+              maxHeight: "min(72vh, 720px)",
+            }}
           >
             <div className="workbench-response-head">
               <div className="workbench-response-head-row workbench-response-head-row--primary">
@@ -1749,6 +1861,20 @@ export default function ApiWorkbench({
                       onClick={() => setRespView("headers")}
                     >
                       Headers
+                    </button>
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={respView === "tests"}
+                      className={`workbench-resp-tab${respView === "tests" ? " workbench-resp-tab--active" : ""}`}
+                      onClick={() => setRespView("tests")}
+                    >
+                      Tests
+                      {scriptTests.length
+                        ? ` (${scriptTests.filter((t) => t.passed).length}/${scriptTests.length})`
+                        : scriptLogs.length
+                          ? ` · ${scriptLogs.length} log`
+                          : ""}
                     </button>
                   </div>
                 )}
@@ -1966,6 +2092,40 @@ export default function ApiWorkbench({
                   </span>
                   <p className="workbench-response-placeholder-hint">填写 URL 后点击 Send，响应将显示在此处</p>
                 </div>
+              </div>
+            ) : respView === "tests" ? (
+              <div className="workbench-script-tests-pane">
+                {scriptRunError ? (
+                  <p className="workbench-script-tests-error" role="alert">
+                    {scriptRunError}
+                  </p>
+                ) : null}
+                {!scriptTests.length && !scriptRunError && !scriptLogs.length ? (
+                  <p className="hint">
+                    在「Scripts → After response」中编写 Tests，或用 <code>console.log</code> 打印变量；Send 后显示于此。
+                  </p>
+                ) : null}
+                {scriptTests.length > 0 ? (
+                  <ul className="workbench-script-tests-list">
+                    {scriptTests.map((t, i) => (
+                      <li
+                        key={`${t.name}:${i}`}
+                        className={`workbench-script-tests-item${
+                          t.passed ? " workbench-script-tests-item--pass" : " workbench-script-tests-item--fail"
+                        }`}
+                      >
+                        <span className="workbench-script-tests-mark" aria-hidden>
+                          {t.passed ? "✓" : "✗"}
+                        </span>
+                        <span>{t.name}</span>
+                        {!t.passed && t.error ? (
+                          <span className="hint workbench-script-tests-item-err">{t.error}</span>
+                        ) : null}
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+                {scriptLogs.length > 0 ? <WorkbenchScriptConsole lines={scriptLogs} /> : null}
               </div>
             ) : respView === "headers" ? (
               <CaptureCodeBlock

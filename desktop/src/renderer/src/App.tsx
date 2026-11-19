@@ -13,6 +13,7 @@ import ApiWorkbench from "./ApiWorkbench";
 import CasesPanel from "./CasesPanel";
 import CreateProjectDialog from "./CreateProjectDialog";
 import ImportOpenApiDialog from "./ImportOpenApiDialog";
+import ExportOpenApiDialog from "./ExportOpenApiDialog";
 import {
   applyOpenApiImportToRepo,
   backfillProjectCasesFromCollections,
@@ -112,6 +113,8 @@ export default function App() {
   const [importOpenApiBusy, setImportOpenApiBusy] = useState(false);
   const [importOpenApiParsed, setImportOpenApiParsed] = useState<ParsedOpenApi | null>(null);
   const [importOpenApiSource, setImportOpenApiSource] = useState<string | undefined>();
+  const [exportOpenApiOpen, setExportOpenApiOpen] = useState(false);
+  const [exportOpenApiServerHint, setExportOpenApiServerHint] = useState<string | undefined>();
   const [bootLoading, setBootLoading] = useState(true);
   const [assetsLoading, setAssetsLoading] = useState(false);
   const [runDetailLoading, setRunDetailLoading] = useState(false);
@@ -589,6 +592,10 @@ export default function App() {
     setImportOpenApiSource,
     startImportOpenApi,
     submitImportOpenApi,
+    exportOpenApiOpen,
+    setExportOpenApiOpen,
+    exportOpenApiServerHint,
+    setExportOpenApiServerHint,
   };
 
   return (
@@ -679,6 +686,10 @@ function AppShell() {
     setImportOpenApiSource,
     startImportOpenApi,
     submitImportOpenApi,
+    exportOpenApiOpen,
+    setExportOpenApiOpen,
+    exportOpenApiServerHint,
+    setExportOpenApiServerHint,
   } = vm as {
     tab: AppTab;
     goTab: (next: AppTab) => void;
@@ -776,9 +787,31 @@ function AppShell() {
       collectionId: string;
       collectionName: string;
     }) => void;
+    exportOpenApiOpen: boolean;
+    setExportOpenApiOpen: (o: boolean) => void;
+    exportOpenApiServerHint: string | undefined;
+    setExportOpenApiServerHint: (s: string | undefined) => void;
   };
 
   const { envName: env, setEnvName: setEnv } = useProjectEnv();
+
+  const startExportOpenApi = useCallback(() => {
+    void (async () => {
+      let server = "{{base_url}}";
+      if (selectedProject) {
+        try {
+          const vars = await window.atp.getProjectVariables(selectedProject, env);
+          const base = vars.base_url?.trim();
+          if (base) server = base;
+        } catch {
+          // keep default
+        }
+      }
+      setExportOpenApiServerHint(server);
+      setExportOpenApiOpen(true);
+    })();
+  }, [selectedProject, env]);
+
   /** 仅切换项目且磁盘资源尚未对齐时全屏「切换工作区」；日常刷新不遮挡 */
   const workspacePending = Boolean(selectedProject && assetsForProject !== selectedProject);
 
@@ -1158,6 +1191,14 @@ function AppShell() {
                       <button
                         type="button"
                         className="nav-btn nav-btn--compact nav-btn--ghost"
+                        disabled={!projects.length}
+                        onClick={() => startExportOpenApi()}
+                      >
+                        OpenAPI 导出
+                      </button>
+                      <button
+                        type="button"
+                        className="nav-btn nav-btn--compact nav-btn--ghost"
                         disabled={!selectedProject || projectDeleteBusy}
                         onClick={() => setPendingProjectDelete(true)}
                       >
@@ -1292,6 +1333,14 @@ function AppShell() {
           setImportOpenApiSource(undefined);
         }}
         onImport={submitImportOpenApi}
+      />
+
+      <ExportOpenApiDialog
+        open={exportOpenApiOpen}
+        projects={projects}
+        defaultServerUrl={exportOpenApiServerHint}
+        onNotify={notify}
+        onCancel={() => setExportOpenApiOpen(false)}
       />
 
       <ConfirmDialog

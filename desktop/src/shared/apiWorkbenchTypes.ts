@@ -17,6 +17,10 @@ export type SavedApiRequest = {
   bodyMode: "none" | "raw";
   body: string;
   bodyContentType?: string;
+  /** Pre-request Script（发送前） */
+  preRequestScript?: string;
+  /** Tests / After response（收到响应后） */
+  testScript?: string;
 };
 
 export type ApiCollectionFile = {
@@ -138,6 +142,10 @@ export type WorkbenchDraft = {
   bodyMode: "none" | "raw";
   body: string;
   bodyContentType?: string;
+  /** Pre-request Script（发送前） */
+  preRequestScript?: string;
+  /** Tests / After response（收到响应后） */
+  testScript?: string;
 };
 
 export type WsConnectPayload = {

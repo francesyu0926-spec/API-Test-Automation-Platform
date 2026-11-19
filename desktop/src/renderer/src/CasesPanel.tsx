@@ -16,6 +16,7 @@ import type { SavedApiRequest, WorkbenchDraft } from "../../shared/apiWorkbenchT
 import { applyImportedCurlAuth } from "./samplerAuth";
 import { useProjectEnvOptional } from "./ProjectEnvContext";
 import CaptureCodeBlock from "./CaptureCodeBlock";
+import { dedupeProjectCollectionRows, suiteRequestFingerprint } from "./collectionListDedup";
 
 type CollectionRow = {
   collectionId: string;
@@ -281,18 +282,35 @@ export default function CasesPanel({
     return cases.filter((c) => c.toLowerCase().includes(q));
   }, [cases, caseFilter]);
 
+  const yamlRequestFingerprints = useMemo(() => {
+    const set = new Set<string>();
+    for (const id of cases) {
+      const text = caseTexts[id];
+      if (!text?.trim()) continue;
+      const draft = caseYamlToWorkbenchDraft(text);
+      if (!draft) continue;
+      set.add(suiteRequestFingerprint(draft.method, buildUrl(draft.url, draft.query)));
+    }
+    return set;
+  }, [cases, caseTexts]);
+
+  const collectionRowsVisible = useMemo(
+    () => dedupeProjectCollectionRows(collectionRows, cases, yamlRequestFingerprints),
+    [collectionRows, cases, yamlRequestFingerprints],
+  );
+
   const filteredCollectionRows = useMemo(() => {
     const q = caseFilter.trim().toLowerCase();
-    if (!q) return collectionRows;
-    return collectionRows.filter((row) => {
+    if (!q) return collectionRowsVisible;
+    return collectionRowsVisible.filter((row) => {
       const hay = `${row.request.name} ${row.request.method} ${row.request.url} ${row.collectionName}`.toLowerCase();
       return hay.includes(q);
     });
-  }, [collectionRows, caseFilter]);
+  }, [collectionRowsVisible, caseFilter]);
 
   const selectedCollectionRow = useMemo(
-    () => collectionRows.find((r) => collectionRowKey(r) === selectedCollectionKey) ?? null,
-    [collectionRows, selectedCollectionKey],
+    () => collectionRowsVisible.find((r) => collectionRowKey(r) === selectedCollectionKey) ?? null,
+    [collectionRowsVisible, selectedCollectionKey],
   );
 
   const listItemCount = listMode === "yaml" ? filteredCases.length : filteredCollectionRows.length;
@@ -545,7 +563,7 @@ export default function CasesPanel({
               }}
             >
               <span className="cases-list-mode-tab-title">集合</span>
-              <span className="cases-list-mode-tab-count">{collectionRows.length}</span>
+              <span className="cases-list-mode-tab-count">{collectionRowsVisible.length}</span>
             </button>
           </div>
           <div className="cases-panel-split-actions" role="toolbar" aria-label="用例操作">
@@ -729,7 +747,16 @@ export default function CasesPanel({
                   <p className="case-list-empty-hint">在 API 工作台调试后点「保存到集合」。</p>
                 </div>
               )}
-              {listMode === "collection" && collectionRows.length > 0 && !filteredCollectionRows.length && (
+              {listMode === "collection" &&
+                collectionRows.length > 0 &&
+                !collectionRowsVisible.length &&
+                !caseFilter.trim() && (
+                  <div className="case-list-empty">
+                    <p className="case-list-empty-title">与 YAML 用例重复</p>
+                    <p className="case-list-empty-hint">集合中的请求已对应 YAML 标签中的用例，无需重复维护。</p>
+                  </div>
+                )}
+              {listMode === "collection" && collectionRowsVisible.length > 0 && !filteredCollectionRows.length && (
                 <div className="case-list-empty">无匹配</div>
               )}
                 </>
