@@ -23,6 +23,7 @@ import { buildJmeterDashboardPdfHtml } from "./jmeterDashboardPdf";
 import { latencyBins } from "./perfHistogram";
 import { previewDashboardPdf } from "./pdfPreviewClient";
 import JtlSampleVirtualTable from "./JtlSampleVirtualTable";
+import HeavyJtlLoadOverlay from "./HeavyJtlLoadOverlay";
 
 type Props = {
   project: string;
@@ -45,6 +46,8 @@ export default function JmeterJtlPanel({
   const [streamAgg, setStreamAgg] = useState<JtlStreamAggregateResult | null>(null);
   const [parseErrors, setParseErrors] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
+  const [parseRows, setParseRows] = useState(0);
+  const [jtlSizeBytes, setJtlSizeBytes] = useState<number | null>(null);
   const [exporting, setExporting] = useState(false);
   const [jmxBusy, setJmxBusy] = useState(false);
   const previewRef = useRef<HTMLDivElement>(null);
@@ -97,8 +100,11 @@ export default function JmeterJtlPanel({
       return null;
     }
     setLoading(true);
+    setParseRows(0);
+    const unsubProgress = window.atp.onJtlParseProgress?.((ev) => setParseRows(ev.rows));
     try {
       const size = await window.atp.statAbsoluteFile(p);
+      setJtlSizeBytes(size ?? null);
       const { mode: modeForLoad, forcedFast } = resolveJtlModeForFileSize(size, jtlStreamMode);
       if (forcedFast) {
         onToast(
@@ -121,9 +127,14 @@ export default function JmeterJtlPanel({
       onToast(`已加载 ${agg.totalRows} 条样本（HTTP ${httpN}）${streamNote}`);
       return agg.samples;
     } finally {
+      unsubProgress?.();
       setLoading(false);
+      setParseRows(0);
     }
   };
+
+  const parseRowEstimate =
+    jtlSizeBytes && jtlSizeBytes > 0 ? Math.max(parseRows, Math.round(jtlSizeBytes / 180)) : null;
 
   useEffect(() => {
     if (!initialJtlPath?.trim()) return;
@@ -415,6 +426,16 @@ export default function JmeterJtlPanel({
 
   return (
     <div className={`loadtest-jtl-shell${loaded ? " loadtest-jtl-shell--ready" : ""}`}>
+      <HeavyJtlLoadOverlay
+        show={loading}
+        parsedRows={parseRows}
+        estimatedTotal={parseRowEstimate}
+        logTail={
+          parseRows > 0
+            ? `流式读取中 · 第 ${parseRows.toLocaleString("zh-CN")} 行…`
+            : "正在打开文件…"
+        }
+      />
       <header className="loadtest-jtl-head">
         <div className="loadtest-jtl-head-copy">
           <h3 className="loadtest-jtl-title">JTL 结果分析</h3>

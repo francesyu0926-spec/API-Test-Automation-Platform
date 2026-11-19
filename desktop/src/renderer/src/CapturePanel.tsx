@@ -12,6 +12,7 @@ import ConfirmDialog from "./ConfirmDialog";
 import AppCustomSelect from "./AppCustomSelect";
 import CaptureSessionsDialog from "./CaptureSessionsDialog";
 import LoadingOverlay from "./LoadingOverlay";
+import { SkeletonTableRows } from "./AppSkeleton";
 import BatchSaveCasesDialog from "./BatchSaveCasesDialog";
 import SaveCaseDialog from "./SaveCaseDialog";
 import { originFromUrl } from "./ProjectTargetField";
@@ -1251,7 +1252,11 @@ export default function CapturePanel({
         <div
           className={`loading-host capture-traffic-table-host${showTrafficListEmpty ? " capture-traffic-table-host--empty" : ""}`}
         >
-          <LoadingOverlay show={showTrafficListLoading} label="加载流量…" />
+          {showTrafficListLoading ? (
+            <div className="capture-traffic-skeleton">
+              <SkeletonTableRows rows={6} cols={5} />
+            </div>
+          ) : (
           <table className="capture-traffic-table">
             {!trafficListEmpty ? (
               <thead>
@@ -1341,6 +1346,7 @@ export default function CapturePanel({
             )}
             </tbody>
           </table>
+          )}
         </div>
         {visibleTransactions.length > 0 && selectedCount === 0 ? (
           <p className="capture-table-foot-hint">勾选多条流量可批量保存为用例</p>

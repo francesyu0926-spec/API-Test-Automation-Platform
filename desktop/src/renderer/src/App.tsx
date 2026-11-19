@@ -22,6 +22,8 @@ import RunSuitePanel from "./RunSuitePanel";
 import { resolveSuiteRunCaseIds, type SuiteRunTarget } from "./resolveSuiteRunTargets";
 import RunsHistoryTable from "./RunsHistoryTable";
 import ProjectEmptyState from "./ProjectEmptyState";
+import { SkeletonDetailPanel } from "./AppSkeleton";
+import WorkspaceBootSkeleton from "./WorkspaceBootSkeleton";
 import AppModuleChrome from "./AppModuleChrome";
 import AppToast from "./AppToast";
 import AppPreferencesDialog from "./AppPreferencesDialog";
@@ -636,7 +638,8 @@ function AppShell() {
     runs: RunRow[];
   };
 
-  const { envName: env, setEnvName: setEnv } = useProjectEnv();
+  const { envName: env, setEnvName: setEnv, variablesLoading } = useProjectEnv();
+  const workspacePending = Boolean(selectedProject && (assetsLoading || variablesLoading));
 
   const onRun = async (targets: SuiteRunTarget[]) => {
     if (!selectedProject) return;
@@ -723,9 +726,9 @@ function AppShell() {
               <AppCustomSelect
                 className="sidebar-workspace-select"
                 value={selectedProject}
-                disabled={!projects.length}
+                disabled={bootLoading || !projects.length}
                 ariaLabel="当前项目"
-                placeholder="暂无项目"
+                placeholder={bootLoading ? "加载中…" : "暂无项目"}
                 title={
                   selectedProject
                     ? `项目 ID：${selectedProject}`
@@ -819,16 +822,23 @@ function AppShell() {
 
       <main
         id="app-main"
-        className={`main loading-host${tab === "api" ? " main--workbench" : ""}${tab === "load" ? " main--workbench" : ""}`}
+        className={`main loading-host${tab === "api" ? " main--workbench" : ""}${tab === "load" ? " main--workbench" : ""}${
+          workspacePending ? " main--workspace-pending" : ""
+        }`}
       >
-        <LoadingOverlay
-          show={bootLoading && !(needsProject && !projectReady)}
-          label="加载工作台…"
-          block={false}
-        />
-        {needsProject && !projectReady && (
+        {workspacePending ? (
+          <div className="workspace-pending-indicator" role="status" aria-live="polite" aria-busy="true">
+            <span className="workspace-pending-line" aria-hidden />
+            <span className="hint workspace-pending-label">切换工作区…</span>
+          </div>
+        ) : null}
+        {bootLoading && needsProject && !projectReady ? (
+          <WorkspaceBootSkeleton layout={tab === "api" || tab === "load" ? "workbench" : "plain"} />
+        ) : null}
+        {!bootLoading && needsProject && !projectReady ? (
           <ProjectEmptyState
-            title={projects.length ? "未选择项目" : "尚无项目"}
+            fullscreen={!projects.length}
+            title={projects.length ? "未选择项目" : "暂无项目"}
             hint={
               projects.length
                 ? "请在左侧项目下拉框中选择项目，或前往「项目与用例」管理资产。"
@@ -837,7 +847,7 @@ function AppShell() {
             onCreateProject={() => openCreateProject()}
             onGoProjects={projects.length ? () => goTab("projects") : undefined}
           />
-        )}
+        ) : null}
         {tab === "suite" && (
           <>
             <AppModuleChrome tab="suite" description={false} />
@@ -915,7 +925,11 @@ function AppShell() {
             {selectedRunId && (
               <Card title={`详情 · ${selectedRunId}`}>
                 <div className="loading-host run-detail-host">
-                  <LoadingOverlay show={runDetailLoading} label="加载执行详情…" />
+                  {runDetailLoading ? (
+                    <div className="run-detail-skeleton-host">
+                      <SkeletonDetailPanel />
+                    </div>
+                  ) : null}
                   {runDetail?.summary && !runDetailLoading ? (
                     <RunDetailPanel
                       summary={runDetail.summary}
@@ -931,11 +945,14 @@ function AppShell() {
 
         {tab === "projects" && (
           <div className="projects-tab-host">
-            {projects.length === 0 ? (
+            {bootLoading ? (
+              <WorkspaceBootSkeleton layout="plain" />
+            ) : projects.length === 0 ? (
               <>
                 <h2 className="page-head">项目与用例</h2>
                 <ProjectEmptyState
-                title="尚无项目"
+                fullscreen
+                title="暂无项目"
                 hint="新建项目后，即可使用 API 调试、抓包与压测功能。"
                 onCreateProject={() => {
                   setCreateProjectBaseUrlHint(undefined);

@@ -1,5 +1,6 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, session, shell } from "electron";
 import fs from "node:fs/promises";
+import { existsSync } from "node:fs";
 import path from "node:path";
 
 // 勿让本机系统代理(8888)劫持 Electron，否则会卡顿/无法拖动窗口
@@ -39,7 +40,37 @@ import type {
   HttpSendPayload,
 } from "../shared/apiWorkbenchTypes";
 
-function createWindow(): void {
+function resolveSplashHtmlPath(): string | null {
+  const candidates = [
+    path.join(__dirname, "../renderer/splash.html"),
+    path.join(__dirname, "../../src/renderer/splash.html"),
+    path.join(app.getAppPath(), "src/renderer/splash.html"),
+  ];
+  for (const p of candidates) {
+    if (existsSync(p)) return p;
+  }
+  return null;
+}
+
+function createSplashWindow(): BrowserWindow {
+  return new BrowserWindow({
+    width: 520,
+    height: 300,
+    frame: false,
+    resizable: false,
+    center: true,
+    show: true,
+    alwaysOnTop: true,
+    backgroundColor: "#121212",
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+      sandbox: true,
+    },
+  });
+}
+
+function createWindow(splash: BrowserWindow | null): void {
   const win = new BrowserWindow({
     width: 1180,
     height: 760,
@@ -61,6 +92,9 @@ function createWindow(): void {
   win.once("ready-to-show", () => {
     win.show();
     win.focus();
+    if (splash && !splash.isDestroyed()) {
+      splash.close();
+    }
   });
 
   win.webContents.on("did-fail-load", (_e, code, desc, url) => {
@@ -88,13 +122,23 @@ function createWindow(): void {
 }
 
 app.whenReady().then(() => {
-  createWindow();
+  let splash: BrowserWindow | null = null;
+  const splashPath = resolveSplashHtmlPath();
+  if (splashPath) {
+    splash = createSplashWindow();
+    void splash.loadFile(splashPath).catch((err) => {
+      console.warn("[splash] load failed", splashPath, err);
+      if (splash && !splash.isDestroyed()) splash.close();
+      splash = null;
+    });
+  }
+  createWindow(splash);
   void (async () => {
     await session.defaultSession.setProxy({ mode: "direct" });
     await capture.recoverStaleCaptureProxy(8888);
   })();
   app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    if (BrowserWindow.getAllWindows().length === 0) createWindow(null);
   });
 });
 
@@ -289,8 +333,16 @@ ipcMain.handle("atp:findJmeterResultJtlFiles", (_e, projectId: string) =>
   findJmeterResultJtlFiles(projectId),
 );
 ipcMain.handle("atp:findJmxFilesNearJtl", (_e, jtlPath: string) => findJmxFilesNearJtl(jtlPath));
-ipcMain.handle("atp:aggregateJtlFile", (_e, jtlPath: string, mode?: string) =>
-  aggregateJtlFile(jtlPath, mode as import("../shared/jtlStreamModes").JtlStreamModeId | undefined),
+ipcMain.handle("atp:aggregateJtlFile", (event, jtlPath: string, mode?: string) =>
+  aggregateJtlFile(
+    jtlPath,
+    mode as import("../shared/jtlStreamModes").JtlStreamModeId | undefined,
+  (progress) => {
+      if (!event.sender.isDestroyed()) {
+        event.sender.send("atp:jtlParseProgress", progress);
+      }
+    },
+  ),
 );
 ipcMain.handle(
   "atp:archiveJtlToPerfFromFile",

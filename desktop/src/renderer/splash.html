@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>ATP</title>
+    <style>
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: #121212;
+        color: #c8f0c8;
+        font-family: "Cascadia Mono", Consolas, ui-monospace, monospace;
+        font-size: 13px;
+        line-height: 1.55;
+        overflow: hidden;
+        -webkit-app-region: drag;
+      }
+      .wrap {
+        display: flex;
+        flex-direction: column;
+        height: 100%;
+        padding: 20px 24px;
+      }
+      .brand {
+        font-weight: 700;
+        color: #ffb74d;
+        margin-bottom: 18px;
+        letter-spacing: 0.08em;
+        font-size: 12px;
+        -webkit-app-region: no-drag;
+      }
+      .term {
+        flex: 1;
+        white-space: pre-wrap;
+        -webkit-app-region: no-drag;
+      }
+      .cursor {
+        display: inline-block;
+        width: 8px;
+        height: 1.1em;
+        margin-left: 2px;
+        vertical-align: text-bottom;
+        background: #81c784;
+        animation: blink 0.9s step-end infinite;
+      }
+      @keyframes blink {
+        50% {
+          opacity: 0;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="brand">ATP</div>
+      <div class="term" id="out"></div>
+    </div>
+    <script>
+      const lines = [
+        "> Initializing API Test Platform v0.1.0...",
+        "> Connecting to local file store...",
+        "> [OK] Repository root",
+        "> Detecting JMeter environment...",
+        "> Starting proxy engine (mitmproxy)...",
+        "> Ready.",
+      ];
+      const out = document.getElementById("out");
+      const cursor = document.createElement("span");
+      cursor.className = "cursor";
+      let li = 0;
+      let ch = 0;
+      let current = "";
+      function tick() {
+        if (li >= lines.length) {
+          out.textContent = lines.join("\n");
+          out.appendChild(cursor);
+          return;
+        }
+        const line = lines[li];
+        if (ch <= line.length) {
+          current = lines.slice(0, li).join("\n");
+          if (li > 0) current += "\n";
+          current += line.slice(0, ch);
+          out.textContent = current;
+          out.appendChild(cursor);
+          ch += 1;
+          setTimeout(tick, ch < 4 ? 22 : 14);
+          return;
+        }
+        li += 1;
+        ch = 0;
+        setTimeout(tick, 120);
+      }
+      tick();
+    </script>
+  </body>
+</html>

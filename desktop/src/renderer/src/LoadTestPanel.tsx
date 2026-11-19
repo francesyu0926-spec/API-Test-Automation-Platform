@@ -33,6 +33,7 @@ import { loadPersistedJtlStreamMode, persistJtlStreamMode } from "./jtlStreamMod
 import type { JtlStreamModeId } from "../../shared/jtlStreamModes";
 import type { NotifyKind } from "./useAppNotify";
 import AppModuleChrome from "./AppModuleChrome";
+import LoadTestSamplerBodyEditor from "./LoadTestSamplerBodyEditor";
 
 const CONFIG_LABELS: Record<LoadTestConfigNode, string> = {
   plan: "测试计划",
@@ -708,7 +709,11 @@ export default function LoadTestPanel({
             {!hideBenchRunToolbar ? benchRunToolbar : null}
           </header>
 
-          <div className="loadtest-editor-scroll">
+          <div
+            className={`loadtest-editor-scroll${
+              mainTab === "config" && configNode === "httpSampler" ? " loadtest-editor-scroll--sampler" : ""
+            }`}
+          >
           {mainTab === "config" && configNode === "plan" && (
             <div className="loadtest-panel card">
               <h3 className="loadtest-panel-title">测试计划</h3>
@@ -968,12 +973,12 @@ export default function LoadTestPanel({
               <div className="loadtest-sampler-compose">
                 <label className="loadtest-sampler-url-block">
                   <span className="loadtest-sampler-field-label loadtest-sampler-field-label--url">请求地址</span>
-                  <div className="loadtest-sampler-url-unified">
+                  <div className="loadtest-sampler-url-unified workbench-url-unified">
                     <div className="workbench-method-group" aria-label="HTTP 方法">
                       <AppCustomSelect
                         variant="method"
                         className="workbench-method--verb"
-                        triggerClassName="workbench-method--verb"
+                        triggerClassName={`workbench-method--verb loadtest-method-picker method-${plan.sampler.method.toLowerCase()}`}
                         value={plan.sampler.method}
                         ariaLabel="HTTP 方法"
                         options={HTTP_METHODS.map((m) => ({ value: m, label: m }))}
@@ -982,15 +987,20 @@ export default function LoadTestPanel({
                         }
                       />
                     </div>
-                    <input
-                      className="text-input workbench-url-input loadtest-sampler-url-input"
-                      value={plan.sampler.url}
-                      placeholder="https://host/path 或 {{base_url}}/path"
-                      spellCheck={false}
-                      onChange={(e) =>
-                        setPlan((p) => ({ ...p, sampler: { ...p.sampler, url: e.target.value } }))
-                      }
-                    />
+                    <div className="workbench-url-field loadtest-sampler-url-field">
+                      <span className="workbench-url-link-icon" aria-hidden title="请求 URL">
+                        🔗
+                      </span>
+                      <input
+                        className="text-input workbench-url-input workbench-url-input--unified loadtest-sampler-url-input"
+                        value={plan.sampler.url}
+                        placeholder="https://host/path 或 {{base_url}}/path"
+                        spellCheck={false}
+                        onChange={(e) =>
+                          setPlan((p) => ({ ...p, sampler: { ...p.sampler, url: e.target.value } }))
+                        }
+                      />
+                    </div>
                   </div>
                   {!samplerHasTarget ? (
                     <p className="loadtest-field-error" role="alert">
@@ -998,25 +1008,16 @@ export default function LoadTestPanel({
                     </p>
                   ) : null}
                 </label>
-                <label className="loadtest-sampler-body-block">
-                  <span className="loadtest-sampler-field-label loadtest-sampler-field-label--body">
-                    <strong>请求体</strong>
-                    <span className="loadtest-sampler-field-suffix">(BODY)</span>
-                  </span>
-                  <textarea
-                    className="loadtest-sampler-body-editor"
-                    value={plan.sampler.body}
-                    placeholder='例如 {"key": "value"} — 无正文可留空'
-                    title="无正文可留空"
-                    spellCheck={false}
-                    onChange={(e) =>
-                      setPlan((p) => ({
-                        ...p,
-                        sampler: { ...p.sampler, bodyMode: "raw", body: e.target.value },
-                      }))
-                    }
-                  />
-                </label>
+                <LoadTestSamplerBodyEditor
+                  value={plan.sampler.body}
+                  onToast={(text) => showToast(text)}
+                  onChange={(body) =>
+                    setPlan((p) => ({
+                      ...p,
+                      sampler: { ...p.sampler, bodyMode: "raw", body },
+                    }))
+                  }
+                />
               </div>
               </div>
             </div>

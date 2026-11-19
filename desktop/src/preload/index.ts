@@ -341,6 +341,7 @@ export type AtpApi = {
   }>;
   cancelJmeter: () => Promise<{ ok: boolean }>;
   onJmeterLog: (handler: (ev: { text: string }) => void) => () => void;
+  onJtlParseProgress: (handler: (ev: { rows: number }) => void) => () => void;
   openPath: (targetPath: string) => Promise<string>;
 };
 
@@ -461,6 +462,11 @@ const api: AtpApi = {
     const listener = (_: unknown, ev: { text: string }) => handler(ev);
     ipcRenderer.on("atp:jmeterLog", listener);
     return () => ipcRenderer.removeListener("atp:jmeterLog", listener);
+  },
+  onJtlParseProgress: (handler: (ev: { rows: number }) => void) => {
+    const listener = (_: unknown, ev: { rows: number }) => handler(ev);
+    ipcRenderer.on("atp:jtlParseProgress", listener);
+    return () => ipcRenderer.removeListener("atp:jtlParseProgress", listener);
   },
   openPath: (targetPath) => ipcRenderer.invoke("atp:openPath", targetPath),
 };

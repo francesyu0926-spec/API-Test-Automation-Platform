@@ -18,9 +18,12 @@ import { jtlStreamOptionsForMode, type JtlStreamModeId } from "../shared/jtlStre
 import { detectJtlFileEncoding } from "./jtlFileEncoding";
 
 /** 流式读取 JTL（CSV），避免整文件读入内存。 */
+export type JtlParseProgress = { rows: number };
+
 export async function aggregateJtlFile(
   filePath: string,
   mode?: JtlStreamModeId | null,
+  onProgress?: (progress: JtlParseProgress) => void,
 ): Promise<JtlStreamAggregateResult> {
   const agg = createJtlStreamAggregator(jtlStreamOptionsForMode(mode));
   let colIndex: Map<string, number> | null = null;
@@ -33,6 +36,9 @@ export async function aggregateJtlFile(
     input: stream as NodeJS.ReadableStream,
     crlfDelay: Infinity,
   });
+
+  let dataRows = 0;
+  let lastProgressAt = 0;
 
   try {
     for await (const rawLine of rl) {
@@ -47,7 +53,13 @@ export async function aggregateJtlFile(
       }
       const sample = parseJtlSampleFromCells(cells, colIndex);
       if (sample) agg.push(sample);
+      dataRows += 1;
+      if (onProgress && dataRows - lastProgressAt >= 2500) {
+        lastProgressAt = dataRows;
+        onProgress({ rows: dataRows });
+      }
     }
+    onProgress?.({ rows: dataRows });
   } finally {
     rl.close();
     stream.destroy();

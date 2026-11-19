@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ConfirmDialog from "./ConfirmDialog";
 import ExportJmxDialog from "./ExportJmxDialog";
 import LoadingOverlay from "./LoadingOverlay";
+import { SkeletonDetailPanel, SkeletonListRows } from "./AppSkeleton";
 import { caseYamlToWorkbenchDraft } from "./caseYaml";
 import {
   buildJmxFromCaseYamls,
@@ -600,6 +601,10 @@ export default function CasesPanel({
               </div>
             ) : (
             <div className="case-list-scroll cases-panel-list-scroll capture-scroll-slim">
+              {assetsLoading && !casesReady ? (
+                <SkeletonListRows rows={6} />
+              ) : (
+                <>
               {listMode === "yaml" &&
                 pagedCases.map((c) => (
                   <div key={c} className={`case-list-item${activeCase === c ? " active" : ""}`}>
@@ -719,6 +724,8 @@ export default function CasesPanel({
               {listMode === "collection" && collectionRows.length > 0 && !filteredCollectionRows.length && (
                 <div className="case-list-empty">无匹配</div>
               )}
+                </>
+              )}
             </div>
             )}
             {listItemCount > CASE_LIST_PAGE && (
@@ -747,11 +754,11 @@ export default function CasesPanel({
           </aside>
 
           <div className="cases-panel-detail loading-host">
-            <LoadingOverlay show={assetsLoading && !casesReady} label="加载项目资源…" block={false} />
-            <LoadingOverlay
-              show={caseLoading && !resolvedCaseYaml.trim() && Boolean(activeCase)}
-              label="加载用例…"
-            />
+            {(assetsLoading && !casesReady) ||
+            (caseLoading && !resolvedCaseYaml.trim() && Boolean(activeCase)) ? (
+              <SkeletonDetailPanel />
+            ) : (
+              <>
             {listMode === "collection" && selectedCollectionRow && (
               <>
                 <header className="cases-panel-detail-head">
@@ -928,6 +935,8 @@ export default function CasesPanel({
                     />
                   )}
                 </div>
+              </>
+            )}
               </>
             )}
           </div>
