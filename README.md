@@ -75,7 +75,7 @@ npm run pack:win
 产物在 `desktop/release/`：**标准版** `npm run pack:win`（`platform/` + Electron，需本机 Python/JMeter）；**完整版 POC** `npm run pack:win:full`（另打包 `runtime/python` 与 `runtime/jmeter`，见 [docs/ROADMAP-DELIVERY.md](docs/ROADMAP-DELIVERY.md)）。
 
 桌面端模块划分、工作区与跨页面操作见 [docs/DESKTOP-UX.md](docs/DESKTOP-UX.md)。  
-**产品说明书（客户版，含截图）**：Markdown [docs/PRODUCT-MANUAL.md](docs/PRODUCT-MANUAL.md) · 可直接打开 [docs/PRODUCT-MANUAL.html](docs/PRODUCT-MANUAL.html) 或交付 [docs/PRODUCT-MANUAL.pdf](docs/PRODUCT-MANUAL.pdf)（约 1.3 MB）。
+**产品说明书**：纯文字详细版 [docs/PRODUCT-MANUAL-DETAILED.md](docs/PRODUCT-MANUAL-DETAILED.md)（全功能、无截图）；客户版含截图见 `docs/PRODUCT-MANUAL.md` / `.html` / `.pdf`（若已生成）。
 
 ## 目录结构
 

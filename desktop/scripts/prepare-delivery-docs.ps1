@@ -14,6 +14,7 @@ $names = @(
     "PRODUCT-MANUAL.pdf",
     "PRODUCT-MANUAL.html",
     "PRODUCT-MANUAL.md",
+    "PRODUCT-MANUAL-DETAILED.md",
     "ROADMAP-DELIVERY.md",
     "DELIVERY-LAYOUT.md"
 )
