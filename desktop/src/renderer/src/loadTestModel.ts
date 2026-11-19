@@ -24,6 +24,33 @@ export type LoadTestConfigNode = "plan" | "threadGroup" | "httpSampler";
 export type LoadTestMainTab = "config" | "history" | "jmeterRun" | "jmeterJtl";
 
 const LOAD_MAIN_TAB_STORAGE_KEY = "atp.loadTest.mainTab";
+const LOAD_PLAN_STORAGE_KEY = "atp.loadTest.planByProject";
+
+export function loadPersistedLoadTestPlan(projectId: string): LoadTestPlan | null {
+  if (!projectId) return null;
+  try {
+    const raw = sessionStorage.getItem(LOAD_PLAN_STORAGE_KEY);
+    if (!raw) return null;
+    const bag = JSON.parse(raw) as Record<string, LoadTestPlan>;
+    const plan = bag[projectId];
+    if (!plan?.sampler || !plan.threadGroup) return null;
+    return plan;
+  } catch {
+    return null;
+  }
+}
+
+export function persistLoadTestPlan(projectId: string, plan: LoadTestPlan): void {
+  if (!projectId) return;
+  try {
+    const raw = sessionStorage.getItem(LOAD_PLAN_STORAGE_KEY);
+    const bag = raw ? (JSON.parse(raw) as Record<string, LoadTestPlan>) : {};
+    bag[projectId] = plan;
+    sessionStorage.setItem(LOAD_PLAN_STORAGE_KEY, JSON.stringify(bag));
+  } catch {
+    /* ignore */
+  }
+}
 
 export function loadPersistedLoadMainTab(): LoadTestMainTab | null {
   try {

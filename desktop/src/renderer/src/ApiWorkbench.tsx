@@ -1324,17 +1324,22 @@ export default function ApiWorkbench({
                     />
                   ) : null}
                 </div>
-                <input
-                  className="text-input workbench-url-input workbench-url-input--unified"
-                  value={draft.url}
-                  placeholder={
-                    protocol === "ws"
-                      ? "wss://echo.websocket.events"
-                      : "https://host/path 或 {{base_url}}/path"
-                  }
-                  title={sendUrlPreview ?? undefined}
-                  onChange={(e) => setDraft((d) => ({ ...d, url: e.target.value }))}
-                />
+                <div className="workbench-url-field">
+                  <span className="workbench-url-link-icon" aria-hidden title="请求 URL">
+                    🔗
+                  </span>
+                  <input
+                    className="text-input workbench-url-input workbench-url-input--unified"
+                    value={draft.url}
+                    placeholder={
+                      protocol === "ws"
+                        ? "wss://echo.websocket.events"
+                        : "https://host/path 或 {{base_url}}/path"
+                    }
+                    title={sendUrlPreview ?? undefined}
+                    onChange={(e) => setDraft((d) => ({ ...d, url: e.target.value }))}
+                  />
+                </div>
                 {protocol === "ws" ? (
                   <span
                     className={`workbench-ws-status-dot${

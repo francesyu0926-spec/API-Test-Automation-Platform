@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { ApiCollectionFile, WorkbenchDraft } from "../../shared/apiWorkbenchTypes";
 import LoadTestHistoryPanel from "./LoadTestHistoryPanel";
@@ -18,7 +18,9 @@ import {
 import {
   defaultLoadTestPlan,
   loadPersistedLoadMainTab,
+  loadPersistedLoadTestPlan,
   persistLoadMainTab,
+  persistLoadTestPlan,
   type LoadTestConfigNode,
   type LoadTestMainTab,
   type LoadTestPlan,
@@ -119,6 +121,8 @@ type Props = {
   projectName: string;
   onNotify?: (text: string, kind?: NotifyKind) => void;
   externalDraft: WorkbenchDraft | null;
+  /** 与工作台灌入一致：按 generation 去重，且勿过早 consume 草稿（Strict Mode 会 remount） */
+  externalInjectGeneration?: number;
   onConsumeExternalDraft: () => void;
   onEditInWorkbench?: (payload: { draft: WorkbenchDraft }) => void;
   /** 偏好设置保存后递增，用于同步 JTL 解析模式 */
@@ -130,15 +134,26 @@ export default function LoadTestPanel({
   projectName,
   onNotify,
   externalDraft,
+  externalInjectGeneration = 0,
   onConsumeExternalDraft,
   jtlStreamPrefsRevision = 0,
 }: Props) {
+  const lastAppliedInjectGenRef = useRef(0);
+  const authSyncedInjectGenRef = useRef(0);
+  const prevProjectRef = useRef<string | undefined>(undefined);
   const {
     envName,
     variables,
     refreshVariables,
     openEnvVariables,
   } = useProjectEnv();
+  const variablesRef = useRef(variables);
+  variablesRef.current = variables;
+  const refreshVariablesRef = useRef(refreshVariables);
+  refreshVariablesRef.current = refreshVariables;
+  const envNameRef = useRef(envName);
+  envNameRef.current = envName;
+  const importFromCollectionOpenRef = useRef(false);
   const [plan, setPlan] = useState<LoadTestPlan>(defaultLoadTestPlan);
   const [mainTab, setMainTab] = useState<LoadTestMainTab>(() => loadPersistedLoadMainTab() ?? "config");
   const [jtlStreamMode, setJtlStreamMode] = useState<JtlStreamModeId>(() => loadPersistedJtlStreamMode());
@@ -173,7 +188,14 @@ export default function LoadTestPanel({
   const [collection, setCollection] = useState<ApiCollectionFile | null>(null);
   const [collectionsLoading, setCollectionsLoading] = useState(false);
   const [importFromCollectionOpen, setImportFromCollectionOpen] = useState(false);
+  importFromCollectionOpenRef.current = importFromCollectionOpen;
   const [perfHistoryCount, setPerfHistoryCount] = useState(0);
+
+  useEffect(() => {
+    if (!project) return;
+    const handle = window.setTimeout(() => persistLoadTestPlan(project, plan), 320);
+    return () => window.clearTimeout(handle);
+  }, [project, plan]);
 
   const refreshPerfHistoryCount = useCallback(() => {
     if (!project) {
@@ -224,14 +246,15 @@ export default function LoadTestPanel({
       setCollection(null);
       return;
     }
-    setCollectionsLoading(true);
+    const showLoading = importFromCollectionOpenRef.current;
+    if (showLoading) setCollectionsLoading(true);
     try {
       const doc =
         (await window.atp.getCollection(project, effectiveCollectionId)) ??
         (await window.atp.ensureCollection(project, effectiveCollectionId));
       setCollection(doc);
     } finally {
-      setCollectionsLoading(false);
+      if (showLoading) setCollectionsLoading(false);
     }
   }, [project, effectiveCollectionId]);
 
@@ -245,38 +268,56 @@ export default function LoadTestPanel({
 
   useEffect(() => {
     if (!project) return;
-    setPlan(defaultLoadTestPlan());
+    const prev = prevProjectRef.current;
+    prevProjectRef.current = project;
+    if (prev === undefined) {
+      setPlan(loadPersistedLoadTestPlan(project) ?? defaultLoadTestPlan());
+      return;
+    }
+    if (prev === project) return;
+    setPlan(loadPersistedLoadTestPlan(project) ?? defaultLoadTestPlan());
     setCollectionId("default");
     setImportFromCollectionOpen(false);
   }, [project]);
 
   useEffect(() => {
-    if (!externalDraft) return;
+    if (!externalDraft || externalInjectGeneration < 1) return;
+    if (externalInjectGeneration <= lastAppliedInjectGenRef.current) return;
+    lastAppliedInjectGenRef.current = externalInjectGeneration;
+
     const normalized = normalizeRawBodyDraft(externalDraft);
+    setPlan((p) => ({
+      ...p,
+      sampler: normalized,
+      sourceRequestId: null,
+      sourceCollectionId: null,
+    }));
+    goConfig("httpSampler");
+    setImportFromCollectionOpen(false);
+
+    if (authSyncedInjectGenRef.current === externalInjectGeneration) return;
+    authSyncedInjectGenRef.current = externalInjectGeneration;
+
     void (async () => {
-      const base = project && envName ? await window.atp.getProjectVariables(project, envName) : {};
-      const withAuth = mergeAuthFromSampler({ ...base, ...variables }, normalized);
+      const varsSnapshot = variablesRef.current;
+      const envSnapshot = envNameRef.current;
+      const base =
+        project && envSnapshot ? await window.atp.getProjectVariables(project, envSnapshot) : {};
+      const withAuth = mergeAuthFromSampler({ ...base, ...varsSnapshot }, normalized);
       const authPatch = authPatchFromSampler(normalized);
-      if (project && envName && Object.keys(authPatch).length) {
-        await persistEnvVariables(project, envName, authPatch);
-        await refreshVariables();
+      if (project && envSnapshot && Object.keys(authPatch).length) {
+        await persistEnvVariables(project, envSnapshot, authPatch);
+        await refreshVariablesRef.current();
       }
-      setPlan((p) => ({
-        ...p,
-        sampler: normalized,
-        sourceRequestId: null,
-        sourceCollectionId: null,
-      }));
-      goConfig("httpSampler");
-      setImportFromCollectionOpen(false);
-      onConsumeExternalDraft();
       showToast(
         withAuth.token?.trim()
           ? "已从 API 工作台载入请求，并同步 token"
           : "已从 API 工作台载入 HTTP 请求",
       );
     })();
-  }, [externalDraft, onConsumeExternalDraft, project, envName, variables, refreshVariables]);
+    // 仅按注入 generation 灌入一次；勿把 variables 列入 deps，否则 refreshVariables 会反复触发本 effect
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional
+  }, [externalDraft, externalInjectGeneration, project]);
 
   const missingEnvVars = useMemo(
     () => unresolvedWorkbenchVars(plan.sampler, variables),
@@ -359,7 +400,6 @@ export default function LoadTestPanel({
     }
     const sampler = savedRequestToDraft(req);
     const withAuth = mergeAuthFromSampler(variables, sampler);
-    setVariables(withAuth);
     setPlan((p) => ({
       ...p,
       sampler,
@@ -379,9 +419,9 @@ export default function LoadTestPanel({
   const samplerHasTarget = Boolean(plan.sampler.url.trim());
   const canPickFromCollection = Boolean(project && collections.length);
   const showImportStrip =
-    canPickFromCollection ||
-    linkedRequest ||
     importFromCollectionOpen ||
+    Boolean(linkedRequest) ||
+    (!samplerHasTarget && canPickFromCollection) ||
     (!project && mainTab === "config" && configNode === "httpSampler");
   const canStart = Boolean(project && samplerHasTarget && missingEnvVars.length === 0);
   const startDisabledReason = !project
@@ -982,21 +1022,19 @@ export default function LoadTestPanel({
             </div>
           )}
 
-          <div
-            className={mainTab === "history" ? "loadtest-history-host" : "loadtest-history-host loadtest-history-host--hidden"}
-            hidden={mainTab !== "history"}
-            aria-hidden={mainTab !== "history"}
-          >
-            <LoadTestHistoryPanel
-              project={project}
-              active={mainTab === "history"}
-              currentReport={null}
-              onToast={showToast}
-              onHistoryCountChange={setPerfHistoryCount}
-              onNavigateTab={goMainTab}
-              environment={envName}
-            />
-          </div>
+          {mainTab === "history" ? (
+            <div className="loadtest-history-host">
+              <LoadTestHistoryPanel
+                project={project}
+                active
+                currentReport={null}
+                onToast={showToast}
+                onHistoryCountChange={setPerfHistoryCount}
+                onNavigateTab={goMainTab}
+                environment={envName}
+              />
+            </div>
+          ) : null}
 
           {mainTab === "jmeterRun" && (
             <JmeterRunPanel

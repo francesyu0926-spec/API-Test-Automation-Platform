@@ -1,4 +1,13 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 
 import ApiWorkbench from "./ApiWorkbench";
 import CasesPanel from "./CasesPanel";
@@ -26,6 +35,7 @@ import {
 } from "./navConfig";
 import { useAppNotify } from "./useAppNotify";
 import type { WorkbenchDraft } from "../../shared/apiWorkbenchTypes";
+import { normalizeRawBodyDraft } from "./apiWorkbenchModel";
 import { caseYamlToWorkbenchDraft } from "./caseYaml";
 import { importProjectCasesToCollection } from "./importProjectCasesToCollection";
 import AppCustomSelect from "./AppCustomSelect";
@@ -35,6 +45,16 @@ type Project = Awaited<ReturnType<typeof window.atp.listProjects>>[number];
 type RunRow = Awaited<ReturnType<typeof window.atp.listRuns>>[number];
 
 const EMPTY_PROJECT_CASES: string[] = [];
+
+type AppViewModel = Record<string, unknown>;
+
+const AppViewModelCtx = createContext<AppViewModel | null>(null);
+
+function useAppVm(): AppViewModel {
+  const ctx = useContext(AppViewModelCtx);
+  if (!ctx) throw new Error("AppViewModel missing");
+  return ctx;
+}
 
 export default function App() {
   const [tab, setTab] = useState<AppTab>(() => loadPersistedTab() ?? "api");
@@ -73,6 +93,8 @@ export default function App() {
   });
   const [workbenchCollectionNonce, setWorkbenchCollectionNonce] = useState(0);
   const [loadTestDraft, setLoadTestDraft] = useState<WorkbenchDraft | null>(null);
+  /** 每次从工作台发到压测时递增，避免 Strict Mode 清空草稿后无法二次灌入 */
+  const [loadTestInjectId, setLoadTestInjectId] = useState(0);
   const [workbenchFromLoadTest, setWorkbenchFromLoadTest] = useState(false);
   const [createProjectOpen, setCreateProjectOpen] = useState(false);
   const [createProjectBaseUrlHint, setCreateProjectBaseUrlHint] = useState<string | undefined>();
@@ -156,17 +178,19 @@ export default function App() {
       const timeout = (ms: number) =>
         new Promise<"timeout">((resolve) => window.setTimeout(() => resolve("timeout"), ms));
       try {
-        const boot = Promise.all([refreshProjects(), refreshRuns()]);
-        const done = await Promise.race([boot, timeout(12_000)]);
+        const projectsBoot = refreshProjects();
+        const done = await Promise.race([projectsBoot, timeout(12_000)]);
         if (done === "timeout") {
           notify("工作台加载超时，已显示界面。请检查 ATP_REPO_ROOT 或重新启动应用。");
         }
       } finally {
         setBootLoading(false);
       }
+      void refreshRuns();
     })();
-    // 仅启动时拉取一次，避免 selectedProject 变化反复全屏 loading
-  }, [refreshProjects, refreshRuns, notify]);
+    // 仅启动时拉取一次；执行记录在后台加载，勿阻塞工作台空态
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional boot-only
+  }, [refreshProjects]);
 
   useEffect(() => {
     if (tab !== "runs") return;
@@ -320,68 +344,6 @@ export default function App() {
   const needsProject = tab === "api" || tab === "load" || tab === "capture";
   const projectReady = Boolean(selectedProject);
 
-  const onRun = async (targets: SuiteRunTarget[]) => {
-    if (!selectedProject) return;
-    if (!targets.length) {
-      notify("请至少选择一个用例");
-      return;
-    }
-    setRunning(true);
-    setLastSuiteRun(null);
-    const caseIds = await resolveSuiteRunCaseIds(selectedProject, suite, targets);
-    if (!caseIds.length) {
-      notify("无法解析所选请求，请检查集合数据");
-      setRunning(false);
-      return;
-    }
-    const result = await window.atp.runSuite({
-      project: selectedProject,
-      suite,
-      env,
-      cases: caseIds,
-    });
-    const stderr = result.stderr?.trim();
-    const stdout = result.stdout?.trim() ?? "";
-    let runView: typeof lastSuiteRun = null;
-    try {
-      if (stdout.startsWith("{")) {
-        const brief = JSON.parse(stdout) as { id?: string; status?: string };
-        if (brief.id) {
-          const detail = await window.atp.getRunDetail(brief.id);
-          if (detail.summary) {
-            runView = {
-              summary: detail.summary,
-              steps: detail.steps,
-              stderr: stderr || undefined,
-            };
-          } else {
-            runView = { summary: brief, steps: [], stderr: stderr || undefined };
-          }
-        }
-      }
-    } catch {
-      // 非 JSON 输出，走下方降级展示
-    }
-    if (!runView) {
-      const raw = [stdout, stderr].filter(Boolean).join("\n");
-      runView = {
-        summary: null,
-        steps: [],
-        stderr: stderr || undefined,
-        rawLog: raw || (result.code === 0 ? "执行成功" : "执行失败"),
-      };
-    } else if (runView.summary && typeof runView.summary === "object") {
-      const st = (runView.summary as { status?: string }).status;
-      if (st === "passed") notify("套件执行通过");
-      else if (st === "failed") notify("套件执行完成，存在失败用例");
-    }
-    setLastSuiteRun(runView);
-    setRunning(false);
-    await refreshAssets();
-    setSuiteTargetsReload((n) => n + 1);
-    await refreshRuns();
-  };
-
   const deleteCurrentProject = async () => {
     if (!selectedProject) return;
     const name = projects.find((p) => p.id === selectedProject)?.name ?? selectedProject;
@@ -450,16 +412,295 @@ export default function App() {
     })();
   };
 
+  const appVm: AppViewModel = {
+    tab,
+    goTab,
+    notify,
+    clearToast,
+    toast,
+    projects,
+    selectedProject,
+    setSelectedProject,
+    selectedProjectName,
+    suite,
+    setSuite,
+    assets,
+    assetsLoading,
+    projectCasesReady,
+    projectCaseNames,
+    projectCaseTexts,
+    projectsActiveCase,
+    setProjectsActiveCase,
+    handleCasePreviewChange,
+    running,
+    setRunning,
+    lastSuiteRun,
+    setLastSuiteRun,
+    selectedRunId,
+    runDetail,
+    runDetailLoading,
+    openRun,
+    clearRunSelection,
+    onRunsDeleted,
+    refreshAssets,
+    refreshRuns,
+    suiteTargetsReload,
+    setSuiteTargetsReload,
+    workbenchDraft,
+    workbenchInjectId,
+    workbenchOpenRequestId,
+    workbenchOpenCollectionId,
+    workbenchCollectionNonce,
+    consumeWorkbenchDraft,
+    openDraftInWorkbench,
+    openApiWorkbench,
+    workbenchFromLoadTest,
+    loadTestDraft,
+    loadTestInjectId,
+    setLoadTestInjectId,
+    setLoadTestDraft,
+    setWorkbenchFromLoadTest,
+    bootLoading,
+    needsProject,
+    projectReady,
+    openCreateProject,
+    createProjectOpen,
+    setCreateProjectOpen,
+    createProjectBaseUrlHint,
+    setCreateProjectBaseUrlHint,
+    preferencesOpen,
+    setPreferencesOpen,
+    projectCollections,
+    pendingProjectDelete,
+    setPendingProjectDelete,
+    projectDeleteBusy,
+    deleteCurrentProject,
+    submitCreateProject,
+    runs,
+  };
+
   return (
-    <ProjectEnvProvider projectId={selectedProject}>
-      <AppLayout />
-    </ProjectEnvProvider>
+    <AppViewModelCtx.Provider value={appVm}>
+      <ProjectEnvProvider projectId={selectedProject}>
+        <AppShell />
+      </ProjectEnvProvider>
+    </AppViewModelCtx.Provider>
   );
+}
 
-  function AppLayout() {
-    const { envName: env, setEnvName: setEnv } = useProjectEnv();
+function AppShell() {
+  const vm = useAppVm();
+  const {
+    tab,
+    goTab,
+    notify,
+    clearToast,
+    toast,
+    projects,
+    selectedProject,
+    setSelectedProject,
+    selectedProjectName,
+    suite,
+    setSuite,
+    assets,
+    assetsLoading,
+    projectCasesReady,
+    projectCaseNames,
+    projectCaseTexts,
+    projectsActiveCase,
+    setProjectsActiveCase,
+    handleCasePreviewChange,
+    running,
+    setRunning,
+    lastSuiteRun,
+    setLastSuiteRun,
+    selectedRunId,
+    runDetail,
+    runDetailLoading,
+    openRun,
+    clearRunSelection,
+    onRunsDeleted,
+    refreshAssets,
+    refreshRuns,
+    suiteTargetsReload,
+    setSuiteTargetsReload,
+    workbenchDraft,
+    workbenchInjectId,
+    workbenchOpenRequestId,
+    workbenchOpenCollectionId,
+    workbenchCollectionNonce,
+    consumeWorkbenchDraft,
+    openDraftInWorkbench,
+    openApiWorkbench,
+    workbenchFromLoadTest,
+    loadTestDraft,
+    loadTestInjectId,
+    setLoadTestInjectId,
+    setLoadTestDraft,
+    setWorkbenchFromLoadTest,
+    bootLoading,
+    needsProject,
+    projectReady,
+    openCreateProject,
+    createProjectOpen,
+    setCreateProjectOpen,
+    createProjectBaseUrlHint,
+    setCreateProjectBaseUrlHint,
+    preferencesOpen,
+    setPreferencesOpen,
+    projectCollections,
+    pendingProjectDelete,
+    setPendingProjectDelete,
+    projectDeleteBusy,
+    deleteCurrentProject,
+    submitCreateProject,
+    runs,
+  } = vm as {
+    tab: AppTab;
+    goTab: (next: AppTab) => void;
+    notify: (text: string, kind?: import("./useAppNotify").NotifyKind) => void;
+    clearToast: () => void;
+    toast: { text: string; kind: import("./useAppNotify").NotifyKind } | null;
+    projects: Project[];
+    selectedProject: string;
+    setSelectedProject: (id: string) => void;
+    selectedProjectName: string;
+    suite: string;
+    setSuite: (s: string) => void;
+    assets: {
+      environments: string[];
+      suites: string[];
+      cases: string[];
+      caseTexts: Record<string, string>;
+    } | null;
+    assetsLoading: boolean;
+    projectCasesReady: boolean;
+    projectCaseNames: string[];
+    projectCaseTexts: Record<string, string>;
+    projectsActiveCase: string | null;
+    setProjectsActiveCase: (name: string | null) => void;
+    handleCasePreviewChange: (ctx: { caseName: string | null; yaml: string }) => void;
+    running: boolean;
+    setRunning: (v: boolean) => void;
+    lastSuiteRun: {
+      summary: unknown | null;
+      steps: unknown[];
+      stderr?: string;
+      rawLog?: string;
+    } | null;
+    setLastSuiteRun: (v: {
+      summary: unknown | null;
+      steps: unknown[];
+      stderr?: string;
+      rawLog?: string;
+    } | null) => void;
+    selectedRunId: string | null;
+    runDetail: { summary: unknown; steps: unknown[] } | null;
+    runDetailLoading: boolean;
+    openRun: (id: string) => Promise<void>;
+    clearRunSelection: () => void;
+    onRunsDeleted: (deletedIds: string[]) => void;
+    refreshAssets: () => Promise<void>;
+    refreshRuns: () => Promise<void>;
+    suiteTargetsReload: number;
+    workbenchDraft: WorkbenchDraft | null;
+    workbenchInjectId: number;
+    workbenchOpenRequestId: string | null;
+    workbenchOpenCollectionId: string | null;
+    workbenchCollectionNonce: number;
+    consumeWorkbenchDraft: () => void;
+    openDraftInWorkbench: (draft: WorkbenchDraft, opts?: { requestId?: string; collectionId?: string }) => void;
+    openApiWorkbench: () => void;
+    workbenchFromLoadTest: boolean;
+    loadTestDraft: WorkbenchDraft | null;
+    loadTestInjectId: number;
+    setLoadTestInjectId: (updater: number | ((n: number) => number)) => void;
+    setLoadTestDraft: (d: WorkbenchDraft | null) => void;
+    setWorkbenchFromLoadTest: (v: boolean) => void;
+    bootLoading: boolean;
+    needsProject: boolean;
+    projectReady: boolean;
+    openCreateProject: (hint?: string) => void;
+    createProjectOpen: boolean;
+    setCreateProjectOpen: (o: boolean) => void;
+    createProjectBaseUrlHint: string | undefined;
+    setCreateProjectBaseUrlHint: (h: string | undefined) => void;
+    preferencesOpen: boolean;
+    setPreferencesOpen: (o: boolean) => void;
+    projectCollections: Array<{ id: string; name: string; requestCount: number }>;
+    pendingProjectDelete: boolean;
+    setPendingProjectDelete: (v: boolean) => void;
+    projectDeleteBusy: boolean;
+    deleteCurrentProject: () => Promise<void>;
+    submitCreateProject: (opts: { id: string; name: string; baseUrl: string }) => void;
+    runs: RunRow[];
+  };
 
-    return (
+  const { envName: env, setEnvName: setEnv } = useProjectEnv();
+
+  const onRun = async (targets: SuiteRunTarget[]) => {
+    if (!selectedProject) return;
+    if (!targets.length) {
+      notify("请至少选择一个用例");
+      return;
+    }
+    setRunning(true);
+    setLastSuiteRun(null);
+    const caseIds = await resolveSuiteRunCaseIds(selectedProject, suite, targets);
+    if (!caseIds.length) {
+      notify("无法解析所选请求，请检查集合数据");
+      setRunning(false);
+      return;
+    }
+    const result = await window.atp.runSuite({
+      project: selectedProject,
+      suite,
+      env,
+      cases: caseIds,
+    });
+    const stderr = result.stderr?.trim();
+    const stdout = result.stdout?.trim() ?? "";
+    let runView: typeof lastSuiteRun = null;
+    try {
+      if (stdout.startsWith("{")) {
+        const brief = JSON.parse(stdout) as { id?: string; status?: string };
+        if (brief.id) {
+          const detail = await window.atp.getRunDetail(brief.id);
+          if (detail.summary) {
+            runView = {
+              summary: detail.summary,
+              steps: detail.steps,
+              stderr: stderr || undefined,
+            };
+          } else {
+            runView = { summary: brief, steps: [], stderr: stderr || undefined };
+          }
+        }
+      }
+    } catch {
+      // 非 JSON 输出，走下方降级展示
+    }
+    if (!runView) {
+      const raw = [stdout, stderr].filter(Boolean).join("\n");
+      runView = {
+        summary: null,
+        steps: [],
+        stderr: stderr || undefined,
+        rawLog: raw || (result.code === 0 ? "执行成功" : "执行失败"),
+      };
+    } else if (runView.summary && typeof runView.summary === "object") {
+      const st = (runView.summary as { status?: string }).status;
+      if (st === "passed") notify("套件执行通过");
+      else if (st === "failed") notify("套件执行完成，存在失败用例");
+    }
+    setLastSuiteRun(runView);
+    setRunning(false);
+    await refreshAssets();
+    setSuiteTargetsReload((n: number) => n + 1);
+    await refreshRuns();
+  };
+
+  return (
     <div className="layout">
       <a className="skip-to-main" href="#app-main">
         跳到主内容
@@ -580,17 +821,21 @@ export default function App() {
         id="app-main"
         className={`main loading-host${tab === "api" ? " main--workbench" : ""}${tab === "load" ? " main--workbench" : ""}`}
       >
-        <LoadingOverlay show={bootLoading} label="加载工作台…" block={false} />
+        <LoadingOverlay
+          show={bootLoading && !(needsProject && !projectReady)}
+          label="加载工作台…"
+          block={false}
+        />
         {needsProject && !projectReady && (
           <ProjectEmptyState
             title={projects.length ? "未选择项目" : "尚无项目"}
             hint={
               projects.length
                 ? "请在左侧项目下拉框中选择项目，或前往「项目与用例」管理资产。"
-                : "创建第一个项目后，即可使用 API 工作台、抓包与负载测试。"
+                : "新建项目后，即可使用 API 调试、抓包与压测功能。"
             }
             onCreateProject={() => openCreateProject()}
-            onGoProjects={() => goTab("projects")}
+            onGoProjects={projects.length ? () => goTab("projects") : undefined}
           />
         )}
         {tab === "suite" && (
@@ -688,29 +933,15 @@ export default function App() {
           <div className="projects-tab-host">
             {projects.length === 0 ? (
               <>
-              <h2 className="page-head">项目与用例</h2>
-              <section className="card panel-empty-card">
-                <div className="panel-empty-state">
-                  <div className="panel-empty-icon" aria-hidden>
-                    ◇
-                  </div>
-                  <p className="panel-empty-title">暂无项目</p>
-                  <p className="panel-empty-hint">
-                    项目对应仓库中的 <code>projects/&lt;id&gt;/</code> 目录，用于管理用例、环境与 API 集合。
-                    请先创建项目。
-                  </p>
-                  <button
-                    type="button"
-                    className="primary"
-                    onClick={() => {
-                      setCreateProjectBaseUrlHint(undefined);
-                      setCreateProjectOpen(true);
-                    }}
-                  >
-                    新建项目
-                  </button>
-                </div>
-              </section>
+                <h2 className="page-head">项目与用例</h2>
+                <ProjectEmptyState
+                title="尚无项目"
+                hint="新建项目后，即可使用 API 调试、抓包与压测功能。"
+                onCreateProject={() => {
+                  setCreateProjectBaseUrlHint(undefined);
+                  setCreateProjectOpen(true);
+                }}
+              />
               </>
             ) : (
               <>
@@ -815,7 +1046,8 @@ export default function App() {
               applyToLoadTest={workbenchFromLoadTest}
               onSendToLoadTest={({ draft }) => {
                 setWorkbenchFromLoadTest(false);
-                setLoadTestDraft(draft);
+                setLoadTestDraft(normalizeRawBodyDraft(draft));
+                setLoadTestInjectId((n) => n + 1);
                 goTab("load");
                 notify("已应用当前请求到负载测试");
               }}
@@ -831,6 +1063,7 @@ export default function App() {
             projectName={selectedProjectName}
             onNotify={notify}
             externalDraft={loadTestDraft}
+            externalInjectGeneration={loadTestInjectId}
             onConsumeExternalDraft={() => {
               setLoadTestDraft(null);
             }}
@@ -871,8 +1104,7 @@ export default function App() {
         onConfirm={() => void deleteCurrentProject()}
       />
     </div>
-    );
-  }
+  );
 }
 
 function Card({ title, children }: { title: string; children: ReactNode }) {
