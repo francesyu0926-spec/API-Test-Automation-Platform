@@ -1,0 +1,2 @@
+# Optional extras for embedded delivery (offline wheels). Used by embed-python-offline-wheels.ps1.
+pytest>=8.0

@@ -3,6 +3,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { resolvePythonPath } from "./runtimePaths";
+
 let cachedRoot: string | null = null;
 
 function hasAtpCliRoot(dir: string): boolean {
@@ -108,12 +110,8 @@ export function setRepoRoot(root: string): void {
   cachedRoot = path.resolve(root);
 }
 
-export function pythonExecutable(repoRoot: string): string {
-  const win = path.join(repoRoot, ".venv", "Scripts", "python.exe");
-  const unix = path.join(repoRoot, ".venv", "bin", "python");
-  if (process.platform === "win32" && fs.existsSync(win)) return win;
-  if (fs.existsSync(unix)) return unix;
-  return process.platform === "win32" ? "python" : "python3";
+export function pythonExecutable(repoRoot: string, userOverride?: string): string {
+  return resolvePythonPath(repoRoot, userOverride).executable;
 }
 
 /** ESM entry helper when __dirname is unavailable. */

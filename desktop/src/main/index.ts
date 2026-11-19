@@ -219,7 +219,7 @@ ipcMain.handle("atp:deleteRuns", (_e, runIds: string[]) => atp.deleteRuns(runIds
 ipcMain.handle("atp:clearAllRuns", () => atp.clearAllRuns());
 ipcMain.handle(
   "atp:runSuite",
-  (_e, opts: { project: string; suite: string; env: string }) => atp.runSuite(opts),
+  (_e, opts: { project: string; suite: string; env: string; cases?: string[] }) => atp.runSuite(opts),
 );
 
 ipcMain.handle("atp:captureConfig", () => capture.loadCaptureConfig());
@@ -294,6 +294,12 @@ ipcMain.handle("atp:installCaptureDeps", () =>
   import("./captureStartupPipeline").then((m) => m.installCaptureDependencies()),
 );
 ipcMain.handle("atp:openRepoRoot", () => shell.openPath(getRepoRoot()));
+ipcMain.handle("atp:openProductManual", async () => {
+  const { getBundledProductManualPdf } = await import("./bundledRuntime");
+  const pdf = getBundledProductManualPdf();
+  if (pdf) return shell.openPath(pdf);
+  return shell.openPath(path.join(getRepoRoot(), "docs", "PRODUCT-MANUAL.pdf"));
+});
 ipcMain.handle("atp:installMitmCa", () => mitmCert.installMitmCaToUserRoot());
 ipcMain.handle("atp:revealMitmCert", async () => {
   try {

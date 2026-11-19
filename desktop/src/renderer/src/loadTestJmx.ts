@@ -36,8 +36,8 @@ function siblingRunOutputDir(jmxAbsolutePath: string): string {
   const sep = trimmed.includes("\\") ? "\\" : "/";
   const last = trimmed.lastIndexOf(sep);
   const dir = last >= 0 ? trimmed.slice(0, last) : trimmed;
-  const day = new Date().toISOString().slice(0, 10).replace(/-/g, "");
-  return `${dir}${sep}run_${day}`;
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+  return `${dir}${sep}run_${stamp}`;
 }
 
 export type LoadTestJmxWriteResult = {
@@ -45,17 +45,22 @@ export type LoadTestJmxWriteResult = {
   absolutePath?: string;
   relativePath?: string;
   outputDir?: string;
+  xml?: string;
+  suggestedFileName?: string;
   error?: string;
   warnings: string[];
 };
 
-export async function writeLoadTestPlanJmx(
-  project: string,
+function jmxFileStamp(): string {
+  return new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+}
+
+export function buildLoadTestPlanJmx(
   plan: LoadTestPlan,
   envName: string,
   variables: Record<string, string>,
   linkedRequestName?: string | null,
-): Promise<LoadTestJmxWriteResult> {
+): Pick<LoadTestJmxWriteResult, "ok" | "xml" | "suggestedFileName" | "error" | "warnings"> {
   const sampler = prepareSamplerForJmx(plan.sampler);
   const label = samplerLabelFromPlan(plan, linkedRequestName);
   const built = buildJmxFromWorkbenchDrafts(
@@ -73,9 +78,43 @@ export async function writeLoadTestPlanJmx(
   if (built.errors.length) {
     warnings.push(...built.errors);
   }
+  const stamp = jmxFileStamp();
+  return {
+    ok: true,
+    xml: built.xml,
+    suggestedFileName: `loadtest-${stamp}.jmx`,
+    warnings,
+  };
+}
 
-  const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-  const rel = `projects/${project}/jmx/loadtest-${stamp}.jmx`;
+export async function saveLoadTestJmxWithDialog(
+  xml: string,
+  suggestedFileName: string,
+): Promise<{ ok: boolean; filePath?: string; cancelled?: boolean; error?: string }> {
+  return window.atp.saveTextWithDialog({
+    defaultPath: suggestedFileName,
+    content: xml,
+    filters: [{ name: "JMeter 测试计划", extensions: ["jmx"] }],
+  });
+}
+
+export async function writeLoadTestPlanJmx(
+  project: string,
+  plan: LoadTestPlan,
+  envName: string,
+  variables: Record<string, string>,
+  linkedRequestName?: string | null,
+): Promise<LoadTestJmxWriteResult> {
+  const built = buildLoadTestPlanJmx(plan, envName, variables, linkedRequestName);
+  if (!built.ok || !built.xml) {
+    return {
+      ok: false,
+      error: built.error ?? "无法生成 JMX",
+      warnings: built.warnings,
+    };
+  }
+  const warnings = built.warnings;
+  const rel = `projects/${project}/jmx/${built.suggestedFileName ?? `loadtest-${jmxFileStamp()}.jmx`}`;
   const repo = await window.atp.writeRepoFile(rel, built.xml);
   if (!repo.ok || !repo.relativePath) {
     return { ok: false, error: repo.error ?? "写入 JMX 失败", warnings };
@@ -89,6 +128,8 @@ export async function writeLoadTestPlanJmx(
     absolutePath,
     relativePath: repo.relativePath,
     outputDir: siblingRunOutputDir(absolutePath),
+    xml: built.xml,
+    suggestedFileName: built.suggestedFileName,
     warnings,
   };
 }

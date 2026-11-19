@@ -1,0 +1,61 @@
+{
+  "id": "openapi",
+  "name": "默认模块",
+  "folders": [
+    "OpenAPI"
+  ],
+  "requests": [
+    {
+      "id": "d0c99ce5-3c2b-4142-bbab-f60980582c7a",
+      "name": "获取代销概览-发行机构",
+      "caseStem": "get-sale-overview-by-issuer-inst",
+      "folder": "OpenAPI",
+      "method": "POST",
+      "url": "{{base_url}}/data/product/stats/sale/get_sale_overview_by_issuer_inst",
+      "headers": [],
+      "query": [],
+      "bodyMode": "raw",
+      "body": "{\n  \"issuerInstIds\": [\n    \"ICI01IN0032\"\n  ],\n  \"sort\": \"relatedSaleProdCount-Asc\",\n  \"pageCurrent\": 1,\n  \"pageSize\": 1\n}",
+      "bodyContentType": "application/json"
+    },
+    {
+      "id": "ad71c108-9136-4a45-9838-6f8b1e97d6d3",
+      "name": "获取代销产品-发行机构",
+      "caseStem": "get-sale-prod-of-issuer-inst",
+      "folder": "OpenAPI",
+      "method": "POST",
+      "url": "{{base_url}}/data/product/stats/sale/get_sale_prod_of_issuer_inst",
+      "headers": [],
+      "query": [],
+      "bodyMode": "raw",
+      "body": "{\n  \"issuerInstId\": \"ICI01IN0032\",\n  \"isGroupBySaleInst\": true,\n  \"sort\": \"perfCompBasicLatest-Asc\",\n  \"pageCurrent\": 59,\n  \"pageSize\": 1\n}",
+      "bodyContentType": "application/json"
+    },
+    {
+      "id": "8301cb1e-f3ce-43ec-b911-fc0fa984c001",
+      "name": "获取代销概览-销售机构",
+      "caseStem": "get-sale-overview-by-sale-inst",
+      "folder": "OpenAPI",
+      "method": "POST",
+      "url": "{{base_url}}/data/product/stats/sale/get_sale_overview_by_sale_inst",
+      "headers": [],
+      "query": [],
+      "bodyMode": "raw",
+      "body": "{\n  \"saleInstIds\": [],\n  \"saleInstTypes\": [],\n  \"sort\": \"saleInstType-Desc\",\n  \"pageCurrent\": 1,\n  \"pageSize\": 10\n}",
+      "bodyContentType": "application/json"
+    },
+    {
+      "id": "546efa53-47ed-40d2-abc2-ed8fcff4807b",
+      "name": "获取代销产品-销售机构",
+      "caseStem": "get-sale-prod-of-sale-inst",
+      "folder": "OpenAPI",
+      "method": "POST",
+      "url": "{{base_url}}/data/product/stats/sale/get_sale_prod_of_sale_inst",
+      "headers": [],
+      "query": [],
+      "bodyMode": "raw",
+      "body": "{\n  \"saleInstId\": \"ICI09IN0006\",\n  \"isGroupByIssuerInst\": true,\n  \"sort\": \"perfCompBasicLatest-Desc\",\n  \"pageCurrent\": 1,\n  \"pageSize\": 1\n}",
+      "bodyContentType": "application/json"
+    }
+  ]
+}

@@ -69,6 +69,7 @@ def main(argv: list[str] | None = None) -> int:
     p_run.add_argument("-p", "--project", help="Project id under projects/")
     p_run.add_argument("-s", "--suite", default="smoke")
     p_run.add_argument("-e", "--env", default="dev")
+    p_run.add_argument("--case", action="append", dest="cases", default=None, help="Run only these case ids (repeatable)")
     p_run.set_defaults(func=cmd_run)
 
     p_list = sub.add_parser("runs", help="List past runs from runs/index.json")

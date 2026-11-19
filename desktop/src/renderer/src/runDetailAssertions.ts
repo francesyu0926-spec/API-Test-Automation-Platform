@@ -24,6 +24,7 @@ const ASSERTION_LABELS: Record<string, string> = {
   status: "状态码",
   duration_ms: "耗时",
   body_contains: "正文包含",
+  error: "执行错误",
 };
 
 export function assertionRowLabels(typeOrName?: string): { short: string; long: string } {

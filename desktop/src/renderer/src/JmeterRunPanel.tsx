@@ -6,15 +6,32 @@ import {
   jmeterVersionLabel,
   suggestJmeterOutputDir,
 } from "./jmeterConsoleLog";
+import {
+  PERF_OTHER_PROJECT_LABEL,
+  resolvePerfArchiveProjectId,
+} from "../../shared/perfProject";
 import { saveBytesWithDialog } from "./saveBytesWithDialog";
 
 const DEFAULT_JMX_HINT =
   "D:\\Document\\LAB\\stockmarket_20260920\\jmeter\\行情接口 v2.jmx";
 
+/** 与下拉选项区分：未选择时显示占位，归档仍归入「其他」 */
+const ARCHIVE_PROJECT_UNSET = "__archive_unset__";
+
+type ProjectOption = { id: string; name?: string };
+
 type Props = {
+  /** 侧栏当前工作区项目（用于默认归属） */
   project: string;
+  projects: ProjectOption[];
   onToast: (msg: string) => void;
-  onRunFinished?: (payload: { jtlPath: string; reportDir?: string; jmxPath: string }) => void;
+  onRunFinished?: (payload: {
+    jtlPath: string;
+    reportDir?: string;
+    jmxPath: string;
+    /** 空字符串表示归档到「其他」 */
+    archiveProjectId: string;
+  }) => void;
   /** 压测配置生成后预填路径 */
   initialJmxPath?: string;
   initialOutputDir?: string;
@@ -25,6 +42,7 @@ type Props = {
 
 export default function JmeterRunPanel({
   project,
+  projects,
   onToast,
   onRunFinished,
   initialJmxPath,
@@ -52,6 +70,8 @@ export default function JmeterRunPanel({
   } | null>(null);
   const logRef = useRef<HTMLDivElement>(null);
   const jmxDropDepth = useRef(0);
+  /** 压测归属项目（非必填）；未选或选「其他」→ projects/_other */
+  const [archiveProjectPick, setArchiveProjectPick] = useState(ARCHIVE_PROJECT_UNSET);
 
   useEffect(() => {
     const off = window.atp.onJmeterLog(({ text }) => {
@@ -90,16 +110,28 @@ export default function JmeterRunPanel({
     void refreshJmeter();
   }, [refreshJmeter]);
 
+  const archiveProjectOptions = useMemo(
+    () => [
+      ...projects.map((p) => ({
+        value: p.id,
+        label: (p.name?.trim() || p.id) as string,
+      })),
+      { value: "", label: PERF_OTHER_PROJECT_LABEL },
+    ],
+    [projects],
+  );
+
+  const archiveProjectForSave =
+    archiveProjectPick === ARCHIVE_PROJECT_UNSET ? "" : archiveProjectPick;
+
+  const jmxLibraryProject = resolvePerfArchiveProjectId(archiveProjectForSave);
+
   useEffect(() => {
-    if (!project) {
-      setProjectJmxFiles([]);
-      return;
-    }
-    void window.atp.listProjectJmxFiles(project).then((files) => {
+    void window.atp.listProjectJmxFiles(jmxLibraryProject).then((files) => {
       const sorted = [...files].sort((a, b) => b.localeCompare(a));
       setProjectJmxFiles(sorted);
     });
-  }, [project]);
+  }, [jmxLibraryProject]);
 
   const applyJmxPath = useCallback((filePath: string, fillOutput = true) => {
     setJmxPath(filePath);
@@ -187,15 +219,37 @@ export default function JmeterRunPanel({
     applyJmxPath(filePath);
   };
 
+  const onExportJmxCopy = async () => {
+    const p = jmxPath.trim();
+    if (!p) {
+      onToast("请先选择 JMX 文件");
+      return;
+    }
+    const text = await window.atp.readAbsoluteFile(p);
+    if (!text?.trim()) {
+      onToast("无法读取 JMX 内容");
+      return;
+    }
+    const name = p.replace(/^.*[\\/]/, "") || "plan.jmx";
+    const res = await window.atp.saveTextWithDialog({
+      defaultPath: name,
+      content: text,
+      filters: [{ name: "JMeter 测试计划", extensions: ["jmx"] }],
+    });
+    if (res.ok && res.filePath) onToast(`JMX 已保存：${res.filePath}`);
+    else if (res.error) onToast(res.error);
+  };
+
   const copyJmxToProject = async (absPath: string) => {
-    if (!project || !copyToProject) return;
+    if (!copyToProject) return;
+    const targetProject = resolvePerfArchiveProjectId(archiveProjectForSave);
     const text = await window.atp.readAbsoluteFile(absPath);
     if (!text) return;
     const base = absPath.replace(/^.*[\\/]/, "").replace(/\.jmx$/i, "") || "imported";
-    const rel = `projects/${project}/jmx/${base}.jmx`;
+    const rel = `projects/${targetProject}/jmx/${base}.jmx`;
     await window.atp.writeRepoFile(rel, text);
     onToast(`JMX 副本已写入 ${rel}`);
-    const list = await window.atp.listProjectJmxFiles(project);
+    const list = await window.atp.listProjectJmxFiles(targetProject);
     setProjectJmxFiles([...list].sort((a, b) => b.localeCompare(a)));
   };
 
@@ -213,6 +267,11 @@ export default function JmeterRunPanel({
       }
       if (paths?.jmx) setJmxPath(jmxFile);
       if (paths?.outDir) setOutputDir(outDir);
+      const jmxProbe = await window.atp.readAbsoluteFile(jmxFile);
+      if (jmxProbe == null) {
+        onToast(`找不到或无法读取 JMX：${jmxFile}`);
+        return;
+      }
       setRunning(true);
       setLog("");
       setLastRun(null);
@@ -235,8 +294,16 @@ export default function JmeterRunPanel({
           return;
         }
         setLastRun({ jtlPath: res.jtlPath, reportDir: res.reportDir, outputDir: res.outputDir });
+        if (res.warning) {
+          onToast(res.warning);
+        }
         onToast(`压测完成：${res.jtlPath}`);
-        onRunFinished?.({ jtlPath: res.jtlPath, reportDir: res.reportDir, jmxPath: res.jmxPath });
+        onRunFinished?.({
+          jtlPath: res.jtlPath,
+          reportDir: res.reportDir,
+          jmxPath: res.jmxPath,
+          archiveProjectId: archiveProjectForSave,
+        });
       } catch (e) {
         onToast(e instanceof Error ? e.message : "执行失败");
       } finally {
@@ -244,6 +311,7 @@ export default function JmeterRunPanel({
       }
     },
     [
+      archiveProjectForSave,
       copyToProject,
       generateReport,
       jmeterHome,
@@ -253,7 +321,6 @@ export default function JmeterRunPanel({
       onRunFinished,
       onToast,
       outputDir,
-      project,
     ],
   );
 
@@ -320,7 +387,7 @@ export default function JmeterRunPanel({
     <div className="loadtest-jmeter-run-shell">
       {fromLoadTestConfig ? (
         <p className="loadtest-jmeter-run-from-config hint">
-          已由「压测配置」生成测试计划并载入下方路径；执行方式与手动导入 JMX 相同。
+          已由「压测配置」生成测试计划并载入下方路径；可另存为本地文件或点「运行」执行。未点「生成并执行」时不会自动开跑。
         </p>
       ) : null}
 
@@ -329,7 +396,7 @@ export default function JmeterRunPanel({
           <h3 className="loadtest-jmeter-run-title">导入并执行 JMX</h3>
           <p className="hint loadtest-jmeter-run-lede">
             本机 <code>jmeter -n</code> 非 GUI 执行，产出 <code>results.jtl</code>
-            {generateReport ? " 与 report/" : ""}。
+            {generateReport ? " 与 report/" : ""}。压测归属项目可选，未选归入「其他」。
           </p>
         </div>
       </header>
@@ -392,7 +459,25 @@ export default function JmeterRunPanel({
             测试计划与输出
           </h4>
 
-          {project && projectJmxOptions.length > 0 ? (
+          <label className="loadtest-field loadtest-jmeter-run-field">
+            <span>压测归属项目（可选）</span>
+            <AppCustomSelect
+              className="loadtest-jmeter-archive-project-select"
+              value={
+                archiveProjectPick === ARCHIVE_PROJECT_UNSET ? ARCHIVE_PROJECT_UNSET : archiveProjectPick
+              }
+              ariaLabel="压测结果归档到哪个项目"
+              placeholder="未选 · 归入其他"
+              options={archiveProjectOptions}
+              onChange={(v) => setArchiveProjectPick(v)}
+            />
+            <p className="hint loadtest-jmeter-advanced-hint">
+              非必填。不选择或选「{PERF_OTHER_PROJECT_LABEL}」时写入{" "}
+              <code>projects/_other/perf</code>。
+            </p>
+          </label>
+
+          {projectJmxOptions.length > 0 ? (
             <label className="loadtest-field loadtest-jmeter-run-field">
               <span>项目内 JMX</span>
               <AppCustomSelect
@@ -436,6 +521,16 @@ export default function JmeterRunPanel({
                 onClick={() => void onBrowseJmx()}
               >
                 📂
+              </button>
+              <button
+                type="button"
+                className="jmeter-input-group-btn"
+                title="将当前 JMX 另存到任意目录"
+                aria-label="另存 JMX"
+                disabled={!jmxPath.trim()}
+                onClick={() => void onExportJmxCopy()}
+              >
+                ⤓
               </button>
             </div>
           </label>
@@ -498,10 +593,9 @@ export default function JmeterRunPanel({
               <input
                 type="checkbox"
                 checked={copyToProject}
-                disabled={!project}
                 onChange={(e) => setCopyToProject(e.target.checked)}
               />
-              保存 JMX 副本到项目
+              保存 JMX 副本到归属项目
             </label>
           </div>
           <div className="loadtest-jmeter-run-actions">

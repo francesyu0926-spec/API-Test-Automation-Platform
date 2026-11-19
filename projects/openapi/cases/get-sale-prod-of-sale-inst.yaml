@@ -1,0 +1,13 @@
+name: get-sale-prod-of-sale-inst
+description: 获取代销产品-销售机构
+request:
+  method: POST
+  url: "{{base_url}}/data/product/stats/sale/get_sale_prod_of_sale_inst"
+  headers:
+    Content-Type: "application/json"
+  body: {"saleInstId":"ICI09IN0006","isGroupByIssuerInst":true,"sort":"perfCompBasicLatest-Desc","pageCurrent":1,"pageSize":1}
+assertions:
+  - type: status
+    equals: 200
+  - type: duration_ms
+    max: 30000

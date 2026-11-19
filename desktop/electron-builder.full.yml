@@ -1,0 +1,39 @@
+appId: com.apitest.automation.platform.full
+productName: API Test Platform Full
+copyright: Copyright © API Test Automation Platform
+directories:
+  output: release
+  buildResources: build
+files:
+  - out/**/*
+  - package.json
+extraResources:
+  - from: pack-staging/platform
+    to: platform
+    filter:
+      - "**/*"
+  - from: pack-staging/runtime
+    to: runtime
+    filter:
+      - "**/*"
+  - from: pack-staging/docs
+    to: docs
+    filter:
+      - "**/*"
+asar: true
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+    - target: portable
+      arch:
+        - x64
+  artifactName: "${productName}-${version}-${arch}.${ext}"
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  shortcutName: API Test Platform Full
+portable:
+  artifactName: "${productName}-${version}-portable-${arch}.exe"

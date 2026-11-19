@@ -7,6 +7,8 @@ export type KeyValueRow = {
 export type SavedApiRequest = {
   id: string;
   name: string;
+  /** 用例文件名 stem（OpenAPI 导入等）；不落盘时由 URL/名称推导 */
+  caseStem?: string;
   folder?: string;
   method: string;
   url: string;

@@ -46,24 +46,77 @@ def run_assertions(case: dict, resp: httpx.Response, elapsed_ms: float) -> list[
     return results
 
 
+def _error_step(
+    case_path: Path,
+    case: dict[str, Any] | None,
+    message: str,
+    *,
+    partial_request: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    started = utc_now_iso()
+    name = (case or {}).get("name") or case_path.stem
+    req = partial_request or {}
+    return {
+        "case": name,
+        "started_at": started,
+        "finished_at": utc_now_iso(),
+        "request": req,
+        "response": {"status": None, "headers": {}, "body_preview": message[:4096]},
+        "duration_ms": 0,
+        "assertions": [{"type": "error", "ok": False, "error": message}],
+        "status": "failed",
+        "error": message,
+    }
+
+
 def execute_case(case_path: Path, variables: dict[str, str], timeout: float, verify: bool) -> dict[str, Any]:
-    case = load_yaml(case_path)
-    req = substitute(case["request"], variables)
-    method = req["method"].upper()
-    url = req["url"]
-    headers = req.get("headers") or {}
-    body = req.get("body")
+    case: dict[str, Any] | None = None
+    try:
+        case = load_yaml(case_path)
+        req = substitute(case["request"], variables)
+        method = req["method"].upper()
+        url = req["url"]
+        headers = req.get("headers") or {}
+        body = req.get("body")
+    except KeyError as exc:
+        hint = "请在「项目与用例」对应环境的 variables / .local.yaml 中补全变量。"
+        return _error_step(case_path, case, f"环境变量未定义: {exc}。{hint}")
+    except Exception as exc:
+        return _error_step(case_path, case, f"用例无法执行: {exc}")
 
     started = utc_now_iso()
     t0 = time.perf_counter()
-    with httpx.Client(timeout=timeout, verify=verify) as client:
-        response = client.request(
-            method,
-            url,
-            headers=headers,
-            json=body if isinstance(body, dict) else None,
-            content=body if isinstance(body, str) else None,
-        )
+    partial = {"method": method, "url": url, "headers": headers}
+    try:
+        with httpx.Client(timeout=timeout, verify=verify) as client:
+            response = client.request(
+                method,
+                url,
+                headers=headers,
+                json=body if isinstance(body, dict) else None,
+                content=body if isinstance(body, str) else None,
+            )
+    except httpx.TimeoutException:
+        elapsed_ms = (time.perf_counter() - t0) * 1000
+        msg = f"请求超时（>{timeout}s）：{method} {url}"
+        step = _error_step(case_path, case, msg, partial_request=partial)
+        step["duration_ms"] = round(elapsed_ms, 2)
+        return step
+    except httpx.RequestError as exc:
+        elapsed_ms = (time.perf_counter() - t0) * 1000
+        hint = ""
+        if "api.example.com" in str(url):
+            hint = " 当前 URL 可能仍指向默认 base_url，请在 dev 环境或 dev.local.yaml 中设置真实 base_url。"
+        msg = f"网络请求失败：{exc!s}{hint}"
+        step = _error_step(case_path, case, msg, partial_request=partial)
+        step["duration_ms"] = round(elapsed_ms, 2)
+        return step
+    except Exception as exc:
+        elapsed_ms = (time.perf_counter() - t0) * 1000
+        step = _error_step(case_path, case, f"请求异常：{exc}", partial_request=partial)
+        step["duration_ms"] = round(elapsed_ms, 2)
+        return step
+
     elapsed_ms = (time.perf_counter() - t0) * 1000
 
     assertions = run_assertions(case, response, elapsed_ms)
@@ -111,9 +164,20 @@ def run_suite(
     started_at = utc_now_iso()
     step_results: list[dict[str, Any]] = []
 
-    for i, case_name in enumerate(suite.get("cases") or [], start=1):
+    suite_cases = list(suite.get("cases") or [])
+    if cases:
+        case_names = [c for c in cases if c in suite_cases or (project_dir / "cases" / f"{c}.yaml").is_file()]
+        if not case_names:
+            case_names = list(cases)
+    else:
+        case_names = suite_cases
+
+    for i, case_name in enumerate(case_names, start=1):
         case_path = project_dir / "cases" / f"{case_name}.yaml"
-        step = execute_case(case_path, variables, timeout, verify)
+        if not case_path.is_file():
+            step = _error_step(case_path, None, f"用例文件不存在：{case_path.relative_to(repo)}")
+        else:
+            step = execute_case(case_path, variables, timeout, verify)
         step_results.append(step)
         atomic_write_json(steps_dir / f"{i:04d}.json", step)
 

@@ -44,6 +44,8 @@ type Props = {
   activeCaseName: string | null;
   onActiveCaseNameChange: (name: string | null) => void;
   onRefresh: () => void;
+  /** 侧栏「刷新」时递增，重载集合列表 */
+  reloadNonce?: number;
   onNotify?: (text: string) => void;
   onCasePreviewChange?: (ctx: { caseName: string | null; yaml: string }) => void;
   onOpenInWorkbench?: (draft: WorkbenchDraft, opts?: { requestId?: string; collectionId?: string }) => void;
@@ -69,6 +71,7 @@ export default function CasesPanel({
   activeCaseName,
   onActiveCaseNameChange,
   onRefresh,
+  reloadNonce = 0,
   onNotify,
   onCasePreviewChange,
   onOpenInWorkbench,
@@ -242,6 +245,11 @@ export default function CasesPanel({
     }, 0);
     return () => window.clearTimeout(t);
   }, [project, loadCollectionRows]);
+
+  useEffect(() => {
+    if (!reloadNonce) return;
+    void loadCollectionRows();
+  }, [reloadNonce, loadCollectionRows]);
 
   useEffect(() => {
     if (cases.length) return;

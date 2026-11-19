@@ -1,0 +1,12 @@
+name: paymenterrorhandler
+description: 模拟支付
+request:
+  method: GET
+  url: "https://www.bidding.shanxiguandian.com/api/project_register/paymentErrorHandler?registerId=8247"
+  headers:
+    token: "{{token}}"
+assertions:
+  - type: status
+    equals: 200
+  - type: duration_ms
+    max: 30000

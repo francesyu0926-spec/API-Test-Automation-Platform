@@ -26,7 +26,16 @@ import {
   type LoadTestPlan,
   type LoadTestThreadGroup,
 } from "./loadTestModel";
-import { writeLoadTestPlanJmx } from "./loadTestJmx";
+import {
+  PERF_OTHER_PROJECT_LABEL,
+  perfArchiveProjectLabel,
+  resolvePerfArchiveProjectId,
+} from "../../shared/perfProject";
+import {
+  saveLoadTestJmxWithDialog,
+  writeLoadTestPlanJmx,
+  type LoadTestJmxWriteResult,
+} from "./loadTestJmx";
 import JtlStreamModeField from "./JtlStreamModeField";
 import AppCustomSelect from "./AppCustomSelect";
 import { loadPersistedJtlStreamMode, persistJtlStreamMode } from "./jtlStreamModePrefs";
@@ -128,6 +137,7 @@ type Props = {
   onEditInWorkbench?: (payload: { draft: WorkbenchDraft }) => void;
   /** 偏好设置保存后递增，用于同步 JTL 解析模式 */
   jtlStreamPrefsRevision?: number;
+  onFocusProjectSelect?: () => void;
 };
 
 export default function LoadTestPanel({
@@ -138,6 +148,7 @@ export default function LoadTestPanel({
   externalInjectGeneration = 0,
   onConsumeExternalDraft,
   jtlStreamPrefsRevision = 0,
+  onFocusProjectSelect,
 }: Props) {
   const lastAppliedInjectGenRef = useRef(0);
   const authSyncedInjectGenRef = useRef(0);
@@ -176,13 +187,26 @@ export default function LoadTestPanel({
     goMainTab("config");
     setConfigNode(node);
   };
+
+  const historyScopeProject = project || PERF_OTHER_PROJECT_ID;
+  const historyScopeLabel =
+    project && projectName
+      ? projectName
+      : project
+        ? project
+        : PERF_OTHER_PROJECT_LABEL;
   const [pendingJtlPath, setPendingJtlPath] = useState("");
   const [launchingJmeter, setLaunchingJmeter] = useState(false);
   const [jmeterPreset, setJmeterPreset] = useState<{
     jmxPath: string;
     outputDir: string;
-    autoRunKey: number;
+    autoRunKey?: number;
     fromConfig: boolean;
+  } | null>(null);
+  const [lastGeneratedJmx, setLastGeneratedJmx] = useState<{
+    relativePath: string;
+    absolutePath: string;
+    suggestedFileName: string;
   } | null>(null);
   const [collections, setCollections] = useState<Awaited<ReturnType<typeof window.atp.listCollections>>>([]);
   const [collectionId, setCollectionId] = useState("default");
@@ -191,6 +215,13 @@ export default function LoadTestPanel({
   const [importFromCollectionOpen, setImportFromCollectionOpen] = useState(false);
   importFromCollectionOpenRef.current = importFromCollectionOpen;
   const [perfHistoryCount, setPerfHistoryCount] = useState(0);
+  const [allProjects, setAllProjects] = useState<{ id: string; name?: string }[]>([]);
+
+  useEffect(() => {
+    void window.atp.listProjects().then((list) =>
+      setAllProjects(list.map((p) => ({ id: p.id, name: p.name }))),
+    );
+  }, []);
 
   useEffect(() => {
     if (!project) return;
@@ -330,21 +361,21 @@ export default function LoadTestPanel({
     return collection.requests.find((r) => r.id === plan.sourceRequestId) ?? null;
   }, [plan.sourceRequestId, collection]);
 
-  const onRun = useCallback(async () => {
+  const validateBeforeJmx = useCallback((): boolean => {
     if (!project) {
       showToast("请先选择项目");
-      return;
+      return false;
     }
     if (!plan.sampler.url.trim()) {
       showToast("请在 HTTP 请求中填写 URL");
       goConfig("httpSampler");
-      return;
+      return false;
     }
     if (missingEnvVars.length) {
       showToast(`未配置变量：${missingEnvVars.join("、")}，请点「变量」填写`);
       openEnvVariables({ sampler: plan.sampler });
       goConfig("httpSampler");
-      return;
+      return false;
     }
     try {
       resolveWorkbenchPayload(plan.sampler, variables);
@@ -352,31 +383,103 @@ export default function LoadTestPanel({
       const msg = err instanceof Error ? err.message : "请检查环境变量";
       showToast(msg);
       if (msg.includes("未定义变量")) openEnvVariables({ sampler: plan.sampler });
-      return;
+      return false;
     }
+    return true;
+  }, [plan, variables, project, missingEnvVars, goConfig, openEnvVariables, showToast]);
 
-    setLaunchingJmeter(true);
-    try {
-      const written = await writeLoadTestPlanJmx(
-        project,
-        plan,
-        envName,
-        variables,
-        linkedRequest?.name,
-      );
-      if (!written.ok || !written.absolutePath) {
-        showToast(written.error ?? "生成 JMX 失败", "error");
-        return;
-      }
+  const applyWrittenJmx = useCallback(
+    (written: LoadTestJmxWriteResult, execute: boolean) => {
+      if (!written.ok || !written.absolutePath || !written.relativePath) return;
       if (written.warnings.length) showToast(written.warnings[0]!);
-      const autoRunKey = Date.now();
+      const suggested =
+        written.suggestedFileName ?? written.relativePath.replace(/^.*[\\/]/, "");
+      setLastGeneratedJmx({
+        relativePath: written.relativePath,
+        absolutePath: written.absolutePath,
+        suggestedFileName: suggested,
+      });
       setJmeterPreset({
         jmxPath: written.absolutePath,
         outputDir: written.outputDir ?? "",
-        autoRunKey,
+        ...(execute ? { autoRunKey: Date.now() } : {}),
         fromConfig: true,
       });
       goMainTab("jmeterRun");
+    },
+    [goMainTab, showToast],
+  );
+
+  const writePlanJmx = useCallback(async () => {
+    if (!project) return null;
+    return writeLoadTestPlanJmx(project, plan, envName, variables, linkedRequest?.name);
+  }, [project, plan, envName, variables, linkedRequest?.name]);
+
+  const onGenerateJmxOnly = useCallback(async () => {
+    if (!validateBeforeJmx()) return;
+    setLaunchingJmeter(true);
+    try {
+      const written = await writePlanJmx();
+      if (!written?.ok || !written.absolutePath) {
+        showToast(written?.error ?? "生成 JMX 失败", "error");
+        return;
+      }
+      if (written.xml && written.suggestedFileName) {
+        const saveDialog = await saveLoadTestJmxWithDialog(written.xml, written.suggestedFileName);
+        if (saveDialog.ok && saveDialog.filePath) {
+          showToast(`JMX 已下载：${saveDialog.filePath}`, "success");
+        } else if (saveDialog.cancelled) {
+          showToast(
+            written.relativePath
+              ? `已写入项目 ${written.relativePath}；已取消另存为，可点「再次下载」导出`
+              : "已写入项目目录；已取消另存为",
+          );
+        } else if (saveDialog.error) {
+          showToast(`另存为失败：${saveDialog.error}`, "error");
+        }
+      }
+      applyWrittenJmx(written, false);
+      showToast(
+        written.relativePath
+          ? `已生成 JMX（未执行）：${written.relativePath}，可在「执行 JMX」页手动运行`
+          : "已生成 JMX（未执行），可在「执行 JMX」页手动运行",
+        "success",
+      );
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : "生成 JMX 失败", "error");
+    } finally {
+      setLaunchingJmeter(false);
+    }
+  }, [validateBeforeJmx, writePlanJmx, applyWrittenJmx, showToast]);
+
+  const onDownloadLastJmx = useCallback(async () => {
+    if (!lastGeneratedJmx) {
+      showToast("请先生成 JMX");
+      return;
+    }
+    const text = await window.atp.readFile(lastGeneratedJmx.relativePath);
+    if (!text?.trim()) {
+      showToast("读取 JMX 失败，请重新生成");
+      return;
+    }
+    const saveDialog = await saveLoadTestJmxWithDialog(text, lastGeneratedJmx.suggestedFileName);
+    if (saveDialog.ok && saveDialog.filePath) {
+      showToast(`JMX 已保存：${saveDialog.filePath}`, "success");
+    } else if (saveDialog.error) {
+      showToast(saveDialog.error, "error");
+    }
+  }, [lastGeneratedJmx, showToast]);
+
+  const onRun = useCallback(async () => {
+    if (!validateBeforeJmx()) return;
+    setLaunchingJmeter(true);
+    try {
+      const written = await writePlanJmx();
+      if (!written?.ok || !written.absolutePath) {
+        showToast(written?.error ?? "生成 JMX 失败", "error");
+        return;
+      }
+      applyWrittenJmx(written, true);
       showToast(
         written.relativePath
           ? `已生成 JMX：${written.relativePath}，正在跳转执行…`
@@ -388,7 +491,7 @@ export default function LoadTestPanel({
     } finally {
       setLaunchingJmeter(false);
     }
-  }, [plan, variables, project, missingEnvVars, envName, linkedRequest?.name]);
+  }, [validateBeforeJmx, writePlanJmx, applyWrittenJmx, showToast]);
 
   const totalSamples = plan.threadGroup.threads * plan.threadGroup.loops;
 
@@ -550,6 +653,26 @@ export default function LoadTestPanel({
             {startDisabledReason}
           </span>
         ) : null}
+        {lastGeneratedJmx ? (
+          <button
+            type="button"
+            className="nav-btn nav-btn--compact nav-btn--ghost"
+            disabled={launchingJmeter}
+            title={lastGeneratedJmx.absolutePath}
+            onClick={() => void onDownloadLastJmx()}
+          >
+            再次下载 JMX
+          </button>
+        ) : null}
+        <button
+          type="button"
+          className="nav-btn nav-btn--compact loadtest-run-generate-only"
+          disabled={launchingJmeter || !canStart}
+          title={!canStart && !launchingJmeter ? startDisabledReason : "写入项目并弹出另存为，不自动执行 JMeter"}
+          onClick={() => void onGenerateJmxOnly()}
+        >
+          {launchingJmeter ? "准备中…" : "仅生成 / 下载 JMX"}
+        </button>
         <button
           type="button"
           className={`primary loadtest-run-primary${canStart && !launchingJmeter ? " loadtest-run-primary--ready" : ""}`}
@@ -557,7 +680,7 @@ export default function LoadTestPanel({
           title={!canStart && !launchingJmeter ? startDisabledReason : undefined}
           onClick={() => void onRun()}
         >
-          {launchingJmeter ? "准备中…" : "生成 JMX 并执行"}
+          {launchingJmeter ? "准备中…" : "生成并执行"}
         </button>
       </div>
     </div>
@@ -728,7 +851,7 @@ export default function LoadTestPanel({
                 />
               </label>
               <p className="hint">
-                结构对标 Apache JMeter：测试计划下挂「线程组」与「HTTP 请求」；配置完成后生成 JMX，在「执行 JMX」用本机 JMeter 运行。
+                结构对标 Apache JMeter：测试计划下挂「线程组」与「HTTP 请求」。可「仅生成 / 下载 JMX」导出文件，或在「执行 JMX」用本机 JMeter 运行。
               </p>
             </div>
           )}
@@ -1029,12 +1152,14 @@ export default function LoadTestPanel({
           {mainTab === "history" ? (
             <div className="loadtest-history-host">
               <LoadTestHistoryPanel
-                project={project}
+                project={historyScopeProject}
+                projectDisplayName={historyScopeLabel}
                 active
                 currentReport={null}
                 onToast={showToast}
                 onHistoryCountChange={setPerfHistoryCount}
                 onNavigateTab={goMainTab}
+                onFocusProjectSelect={onFocusProjectSelect}
                 environment={envName}
               />
             </div>
@@ -1043,29 +1168,34 @@ export default function LoadTestPanel({
           {mainTab === "jmeterRun" && (
             <JmeterRunPanel
               project={project}
+              projects={allProjects}
               onToast={showToast}
               initialJmxPath={jmeterPreset?.jmxPath}
               initialOutputDir={jmeterPreset?.outputDir}
               autoRunKey={jmeterPreset?.autoRunKey}
               fromLoadTestConfig={jmeterPreset?.fromConfig ?? false}
-              onRunFinished={({ jtlPath, jmxPath }) => {
+              onRunFinished={({ jtlPath, jmxPath, archiveProjectId }) => {
                 setPendingJtlPath(jtlPath);
                 void (async () => {
-                  if (!project) {
-                    goMainTab("jmeterJtl");
-                    showToast("已跳转 JTL 报告页");
-                    return;
-                  }
-                  const archived = await archiveJmeterJtlToPerf(project, jtlPath, jmxPath, jtlStreamMode);
+                  const archiveId = resolvePerfArchiveProjectId(archiveProjectId);
+                  const archiveLabel = perfArchiveProjectLabel(
+                    archiveId,
+                    Object.fromEntries(allProjects.map((p) => [p.id, p.name ?? p.id])),
+                  );
+                  const archived = await archiveJmeterJtlToPerf(
+                    archiveProjectId,
+                    jtlPath,
+                    jmxPath,
+                    jtlStreamMode,
+                  );
+                  goMainTab("jmeterJtl");
                   if (archived.ok) {
                     refreshPerfHistoryCount();
-                    goMainTab("jmeterJtl");
                     showToast(
-                      `JMX 执行完成，已载入 JTL；压测历史已存档（${archived.relativePath ?? "perf"}）`,
+                      `JMX 执行完成；已归档至「${archiveLabel}」（${archived.relativePath ?? "perf"}）`,
                       "success",
                     );
                   } else {
-                    goMainTab("jmeterJtl");
                     showToast(archived.error ?? "未能写入压测历史，请在 JTL 报告页手动加载");
                   }
                 })();

@@ -72,7 +72,7 @@ npm install
 npm run pack:win
 ```
 
-产物在 `desktop/release/`：`API Test Platform-0.1.0-x64.exe`（NSIS 安装包）与 `API Test Platform-0.1.0-portable-x64.exe`（免安装）。内置 `resources/platform/`（`atp`、`schemas`、`projects` 等，已排除 JMeter `run_*` 输出目录）。套件跑用例仍需本机 Python（可选在数据目录建 `.venv` 并 `pip install -r requirements.txt`）。
+产物在 `desktop/release/`：**标准版** `npm run pack:win`（`platform/` + Electron，需本机 Python/JMeter）；**完整版 POC** `npm run pack:win:full`（另打包 `runtime/python` 与 `runtime/jmeter`，见 [docs/ROADMAP-DELIVERY.md](docs/ROADMAP-DELIVERY.md)）。
 
 桌面端模块划分、工作区与跨页面操作见 [docs/DESKTOP-UX.md](docs/DESKTOP-UX.md)。  
 **产品说明书（客户版，含截图）**：Markdown [docs/PRODUCT-MANUAL.md](docs/PRODUCT-MANUAL.md) · 可直接打开 [docs/PRODUCT-MANUAL.html](docs/PRODUCT-MANUAL.html) 或交付 [docs/PRODUCT-MANUAL.pdf](docs/PRODUCT-MANUAL.pdf)（约 1.3 MB）。

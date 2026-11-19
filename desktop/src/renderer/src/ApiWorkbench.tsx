@@ -6,6 +6,8 @@ import CaseSaveConflictDialog from "./CaseSaveConflictDialog";
 import ConfirmDialog from "./ConfirmDialog";
 import { workbenchDraftCaseStem, workbenchDraftToCaseYaml } from "./caseYaml";
 import ImportCurlDialog from "./ImportCurlDialog";
+import GenerateCurlDialog from "./GenerateCurlDialog";
+import { draftToCurl } from "./workbenchToCurl";
 import { useProjectEnv } from "./ProjectEnvContext";
 import AppCustomSelect from "./AppCustomSelect";
 import WorkbenchKvTable, { type WorkbenchKvTableHandle } from "./WorkbenchKvTable";
@@ -155,6 +157,8 @@ export default function ApiWorkbench({
   const [pendingFolderDelete, setPendingFolderDelete] = useState<string | null>(null);
   const [pendingRequestDelete, setPendingRequestDelete] = useState<string | null>(null);
   const [importCurlOpen, setImportCurlOpen] = useState(false);
+  const [generateCurlOpen, setGenerateCurlOpen] = useState(false);
+  const [generateCurlText, setGenerateCurlText] = useState("");
   const [pendingCaseConflict, setPendingCaseConflict] = useState<{
     projectId: string;
     caseName: string;
@@ -379,6 +383,19 @@ export default function ApiWorkbench({
       return coalesceAuthVariables({ ...variables });
     }
   }, [project, envName, variables]);
+
+  const openGenerateCurl = useCallback(() => {
+    void (async () => {
+      if (protocol !== "http") {
+        showToast("请在 HTTP 模式下生成 cURL");
+        return;
+      }
+      const vars = await fetchProjectVariables();
+      const text = draftToCurl(draft, vars, { insecureTls: ignoreTlsInsecure });
+      setGenerateCurlText(text);
+      setGenerateCurlOpen(true);
+    })();
+  }, [draft, fetchProjectVariables, ignoreTlsInsecure, protocol]);
 
   const ensureEnvReadyForDraft = useCallback(
     (
@@ -1527,6 +1544,15 @@ export default function ApiWorkbench({
                     </span>
                     保存至「{activeCollectionName}」
                   </p>
+                  {protocol === "http" ? (
+                    <button
+                      type="button"
+                      className="capture-detail-more-item"
+                      onClick={() => openGenerateCurl()}
+                    >
+                      生成 cURL
+                    </button>
+                  ) : null}
                   {activeRequestId ? (
                     <button
                       type="button"
@@ -1995,6 +2021,13 @@ export default function ApiWorkbench({
           </div>
         </section>
       </div>
+
+      <GenerateCurlDialog
+        open={generateCurlOpen}
+        curlText={generateCurlText}
+        onCancel={() => setGenerateCurlOpen(false)}
+        onCopied={() => showToast("cURL 已复制", 2000)}
+      />
 
       <ImportCurlDialog
         open={importCurlOpen}

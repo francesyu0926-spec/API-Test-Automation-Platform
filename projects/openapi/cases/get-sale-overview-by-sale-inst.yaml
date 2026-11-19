@@ -1,0 +1,13 @@
+name: get-sale-overview-by-sale-inst
+description: 获取代销概览-销售机构
+request:
+  method: POST
+  url: "{{base_url}}/data/product/stats/sale/get_sale_overview_by_sale_inst"
+  headers:
+    Content-Type: "application/json"
+  body: {"saleInstIds":[],"saleInstTypes":[],"sort":"saleInstType-Desc","pageCurrent":1,"pageSize":10}
+assertions:
+  - type: status
+    equals: 200
+  - type: duration_ms
+    max: 30000

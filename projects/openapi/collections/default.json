@@ -1,0 +1,57 @@
+{
+  "id": "default",
+  "name": "默认模块",
+  "folders": [
+    "项目用例"
+  ],
+  "requests": [
+    {
+      "id": "case:get-sale-overview-by-issuer-inst",
+      "name": "get-sale-overview-by-issuer-inst",
+      "folder": "项目用例",
+      "method": "POST",
+      "url": "{{base_url}}/data/product/stats/sale/get_sale_overview_by_issuer_inst",
+      "headers": [],
+      "query": [],
+      "bodyMode": "raw",
+      "body": "{\n  \"issuerInstIds\": [\n    \"ICI01IN0032\"\n  ],\n  \"sort\": \"relatedSaleProdCount-Asc\",\n  \"pageCurrent\": 1,\n  \"pageSize\": 1\n}",
+      "bodyContentType": "application/json"
+    },
+    {
+      "id": "case:get-sale-overview-by-sale-inst",
+      "name": "get-sale-overview-by-sale-inst",
+      "folder": "项目用例",
+      "method": "POST",
+      "url": "{{base_url}}/data/product/stats/sale/get_sale_overview_by_sale_inst",
+      "headers": [],
+      "query": [],
+      "bodyMode": "raw",
+      "body": "{\n  \"saleInstIds\": [],\n  \"saleInstTypes\": [],\n  \"sort\": \"saleInstType-Desc\",\n  \"pageCurrent\": 1,\n  \"pageSize\": 10\n}",
+      "bodyContentType": "application/json"
+    },
+    {
+      "id": "case:get-sale-prod-of-issuer-inst",
+      "name": "get-sale-prod-of-issuer-inst",
+      "folder": "项目用例",
+      "method": "POST",
+      "url": "{{base_url}}/data/product/stats/sale/get_sale_prod_of_issuer_inst",
+      "headers": [],
+      "query": [],
+      "bodyMode": "raw",
+      "body": "{\n  \"issuerInstId\": \"ICI01IN0032\",\n  \"isGroupBySaleInst\": true,\n  \"sort\": \"perfCompBasicLatest-Asc\",\n  \"pageCurrent\": 59,\n  \"pageSize\": 1\n}",
+      "bodyContentType": "application/json"
+    },
+    {
+      "id": "case:get-sale-prod-of-sale-inst",
+      "name": "get-sale-prod-of-sale-inst",
+      "folder": "项目用例",
+      "method": "POST",
+      "url": "{{base_url}}/data/product/stats/sale/get_sale_prod_of_sale_inst",
+      "headers": [],
+      "query": [],
+      "bodyMode": "raw",
+      "body": "{\n  \"saleInstId\": \"ICI09IN0006\",\n  \"isGroupByIssuerInst\": true,\n  \"sort\": \"perfCompBasicLatest-Desc\",\n  \"pageCurrent\": 1,\n  \"pageSize\": 1\n}",
+      "bodyContentType": "application/json"
+    }
+  ]
+}

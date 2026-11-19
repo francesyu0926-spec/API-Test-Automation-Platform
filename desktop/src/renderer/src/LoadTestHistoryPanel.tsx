@@ -93,6 +93,10 @@ type Props = {
   onToast: (msg: string) => void;
   onHistoryCountChange?: (count: number) => void;
   onNavigateTab?: (tab: "config" | "jmeterRun") => void;
+  /** 引导用户到侧栏切换项目 */
+  onFocusProjectSelect?: () => void;
+  /** 展示用项目名（与左上角下拉一致） */
+  projectDisplayName?: string;
   /** 与压测配置当前环境一致，写入 PDF */
   environment?: string;
 };
@@ -108,6 +112,8 @@ export default function LoadTestHistoryPanel({
   onToast,
   onHistoryCountChange,
   onNavigateTab,
+  onFocusProjectSelect,
+  projectDisplayName,
   environment,
 }: Props) {
   const [history, setHistory] = useState<PerfListItem[]>([]);
@@ -649,6 +655,23 @@ export default function LoadTestHistoryPanel({
                 <p className="loadtest-history-empty-title">暂无压测历史记录</p>
                 <p className="loadtest-history-empty-lede">
                   执行一次 JMX 或 HTTP 压测后，数据将自动归档在此。
+                </p>
+                <p className="loadtest-history-empty-project">
+                  当前仅展示「
+                  <strong>{projectDisplayName?.trim() || project || "当前项目"}</strong>
+                  」的压测数据；其它项目的记录需先切换项目后查看。
+                  {onFocusProjectSelect ? (
+                    <>
+                      {" "}
+                      <button
+                        type="button"
+                        className="loadtest-history-empty-project-link"
+                        onClick={onFocusProjectSelect}
+                      >
+                        点击切换项目
+                      </button>
+                    </>
+                  ) : null}
                 </p>
                 {onNavigateTab ? (
                   <div className="loadtest-history-empty-actions">

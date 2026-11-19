@@ -27,6 +27,7 @@ type RunStep = {
     headers?: Record<string, string>;
     body_preview?: string;
   };
+  error?: string;
   assertions?: Array<{
     ok?: boolean;
     name?: string;
@@ -215,6 +216,11 @@ export default function RunDetailPanel({ summary: rawSummary, steps: rawSteps, p
                 </button>
                 {open ? (
                   <div className="run-detail-step-body">
+                    {step.error ? (
+                      <p className="run-detail-step-error" role="alert">
+                        {step.error}
+                      </p>
+                    ) : null}
                     {(step.assertions?.length ?? 0) > 0 ? (
                       <div className="run-detail-block">
                         <h4 className="run-detail-block-title">断言</h4>

@@ -1,3 +1,4 @@
+import { resolvePerfArchiveProjectId } from "../../shared/perfProject";
 import type { JtlStreamModeId } from "../../shared/jtlStreamModes";
 import { loadPersistedJtlStreamMode } from "./jtlStreamModePrefs";
 
@@ -7,10 +8,10 @@ export async function archiveJmeterJtlToPerf(
   jmxPath?: string,
   mode?: JtlStreamModeId,
 ): Promise<{ ok: boolean; error?: string; relativePath?: string }> {
-  if (!projectId?.trim()) return { ok: false, error: "未选择项目" };
+  const resolvedProject = resolvePerfArchiveProjectId(projectId);
   const p = jtlPath.trim();
   if (!p) return { ok: false, error: "JTL 路径为空" };
   const resolvedMode = mode ?? loadPersistedJtlStreamMode();
 
-  return window.atp.archiveJtlToPerfFromFile(projectId, p, jmxPath?.trim() || undefined, resolvedMode);
+  return window.atp.archiveJtlToPerfFromFile(resolvedProject, p, jmxPath?.trim() || undefined, resolvedMode);
 }

@@ -39,7 +39,36 @@ export function suggestedCaseNameFromUrl(url: string): string {
   return caseNameFromUrl(url);
 }
 
+function pathTailStem(pathPart: string): string {
+  const last = pathPart.split("/").filter(Boolean).pop() ?? "";
+  const cleaned = last.replace(/\{[^}]+\}/g, "");
+  const stem = slugCaseName(cleaned);
+  return stem !== "captured-case" ? stem : "";
+}
+
+/** 从含 {{base_url}}、相对路径或完整 URL 提取路径末段作为用例 stem */
+export function caseNameFromTemplatedUrl(url: string): string {
+  const trimmed = url.trim();
+  if (!trimmed) return "captured-case";
+  try {
+    const u = new URL(trimmed);
+    const parts = u.pathname.split("/").filter(Boolean);
+    const last = parts[parts.length - 1]?.replace(/\{[^}]+\}/g, "") ?? "";
+    const stem = slugCaseName(last || u.hostname.replace(/\./g, "-"));
+    return stem || "captured-case";
+  } catch {
+    const withoutQuery = trimmed.split("?")[0] ?? trimmed;
+    const pathOnly = withoutQuery
+      .replace(/^\{\{[^}]+\}\}/i, "")
+      .replace(/^https?:\/\/[^/]+/i, "");
+    const stem = pathTailStem(pathOnly.startsWith("/") ? pathOnly : `/${pathOnly}`);
+    return stem || "captured-case";
+  }
+}
+
 function caseNameFromUrl(url: string): string {
+  const fromTemplate = caseNameFromTemplatedUrl(url);
+  if (fromTemplate !== "captured-case") return fromTemplate;
   try {
     const u = new URL(url);
     const parts = u.pathname.split("/").filter(Boolean);
@@ -47,6 +76,29 @@ function caseNameFromUrl(url: string): string {
   } catch {
     return "captured-case";
   }
+}
+
+/** OpenAPI 等：operationId / 路径末段 / 方法+路径 → cases 文件名 */
+export function caseStemFromOpenApiOperation(opts: {
+  operationId?: string;
+  method: string;
+  pathTemplate: string;
+}): string {
+  const opId = opts.operationId?.trim();
+  if (opId) {
+    const fromId = slugCaseName(opId);
+    if (fromId !== "captured-case") return fromId;
+  }
+  const path = opts.pathTemplate.startsWith("/") ? opts.pathTemplate : `/${opts.pathTemplate}`;
+  const fromPath = caseNameFromTemplatedUrl(`{{base_url}}${path}`);
+  if (fromPath !== "captured-case") return fromPath;
+  const meth = opts.method.trim().toLowerCase() || "get";
+  const tail = pathTailStem(path);
+  if (tail) {
+    const combined = slugCaseName(`${meth}-${tail}`);
+    return combined !== "captured-case" ? combined : `${meth}-${tail}`.slice(0, 48);
+  }
+  return "openapi-case";
 }
 
 function templateUrl(url: string): { templated: string; origin?: string } {
@@ -132,19 +184,30 @@ export function captureTxToCaseYaml(tx: unknown): string {
 /** 工作台保存用例时的默认文件名（cases/*.yaml，不含扩展名） */
 export function workbenchDraftCaseStem(draft: WorkbenchDraft): string {
   const url = buildUrl(draft.url, draft.query);
-  return slugCaseName(draft.name?.trim() || caseNameFromUrl(url));
+  const label = draft.name?.trim();
+  if (label) {
+    const fromLabel = slugCaseName(label);
+    if (fromLabel !== "captured-case") return fromLabel;
+  }
+  return caseNameFromUrl(url);
 }
 
-export function workbenchDraftToCaseYaml(draft: WorkbenchDraft, responseStatus?: number): string {
+export function workbenchDraftToCaseYaml(
+  draft: WorkbenchDraft,
+  responseStatus?: number,
+  opts?: { displayName?: string },
+): string {
   const url = buildUrl(draft.url, draft.query);
-  const name = workbenchDraftCaseStem(draft);
+  const fileStem = workbenchDraftCaseStem(draft);
+  const name = opts?.displayName?.trim() || fileStem;
   const method = draft.method.toUpperCase();
   const headers = headersForSend(draft);
   const body =
     draft.bodyMode === "raw" && method !== "GET" && method !== "HEAD" ? draft.body : undefined;
 
+  const nameLine = /[:#\n"'\\]/.test(name) || /[\u4e00-\u9fff]/.test(name) ? `name: ${yamlScalar(name)}` : `name: ${name}`;
   const lines = [
-    `name: ${name}`,
+    nameLine,
     "description: 由 API 工作台生成",
     "request:",
     `  method: ${method}`,

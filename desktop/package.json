@@ -9,6 +9,11 @@
     "build": "electron-vite build",
     "pack:stage": "powershell -ExecutionPolicy Bypass -File ./scripts/prepare-platform-bundle.ps1",
     "pack:win": "npm run build && npm run pack:stage && electron-builder --win --config electron-builder.yml",
+    "pack:stage:runtime": "powershell -ExecutionPolicy Bypass -File ./scripts/prepare-full-runtime.ps1",
+    "runtime:prepare-dev": "powershell -ExecutionPolicy Bypass -File ./scripts/prepare-runtime-dev.ps1",
+    "runtime:embed-wheels": "powershell -ExecutionPolicy Bypass -File ./scripts/embed-python-offline-wheels.ps1",
+    "pack:stage:docs": "powershell -ExecutionPolicy Bypass -File ./scripts/prepare-delivery-docs.ps1",
+    "pack:win:full": "npm run build && npm run pack:stage && npm run pack:stage:runtime && npm run pack:stage:docs && electron-builder --win --config electron-builder.full.yml",
     "preview": "electron-vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.node.json",
     "electron:install": "powershell -ExecutionPolicy Bypass -File ./scripts/install-electron-win.ps1"

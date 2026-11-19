@@ -16,6 +16,8 @@ desktop/out/
 desktop/dist/
 desktop/release/
 desktop/pack-staging/
+desktop/runtime-dev/
+desktop/cache/
 
 # Python
 __pycache__/

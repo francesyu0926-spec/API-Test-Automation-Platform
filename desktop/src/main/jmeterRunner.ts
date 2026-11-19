@@ -1,7 +1,12 @@
 import { spawn, type ChildProcessWithoutNullStreams, type SpawnOptions } from "node:child_process";
+import fsSync from "node:fs";
 import fs from "node:fs/promises";
 import { access as fsAccess } from "node:fs/promises";
 import path from "node:path";
+
+import { jmeterProcessEnv } from "./bundledRuntime";
+import { getRepoRoot } from "./repo";
+import { bundledJmeterHome, userJmeterHomeOverride } from "./runtimePaths";
 
 export type JmeterLogSink = (text: string) => void;
 
@@ -38,6 +43,8 @@ export type RunJmeterResult = {
   stdout: string;
   stderr: string;
   error?: string;
+  /** 退出码非 0 但 JTL/报告已生成（例如存在失败样本） */
+  warning?: string;
 };
 
 function jmeterHomeFromEnv(): string | undefined {
@@ -72,6 +79,7 @@ async function discoverJmeterHomes(): Promise<string[]> {
     ordered.push(path.resolve(h));
   };
 
+  push(bundledJmeterHome() ?? undefined);
   push(jmeterHomeFromEnv());
 
   const pathEnv = process.env.PATH ?? "";
@@ -122,9 +130,14 @@ export async function autoDetectJmeter(): Promise<JmeterDetectResult> {
 }
 
 export async function detectJmeter(customHome?: string): Promise<JmeterDetectResult> {
-  const trimmed = customHome?.trim();
+  const trimmed = userJmeterHomeOverride(customHome, getRepoRoot());
   if (trimmed) {
     return jmeterHomeValid(trimmed);
+  }
+  const bundled = bundledJmeterHome();
+  if (bundled) {
+    const res = await jmeterHomeValid(bundled);
+    if (res.found) return res;
   }
   const fromEnv = jmeterHomeFromEnv();
   if (fromEnv) {
@@ -157,18 +170,130 @@ export function cancelJmeterRun(): { ok: boolean } {
 const JMETER_FATAL_LINE =
   /Error in NonGUIDriver|An error occurred:|java\.lang\.(IllegalArgumentException|RuntimeException)/i;
 
+const JMETER_DRIVER_FATAL = /Error in NonGUIDriver|An error occurred:/i;
+
+async function jtlLooksUsable(jtlPath: string): Promise<boolean> {
+  try {
+    const st = await fs.stat(jtlPath);
+    return st.size > 80;
+  } catch {
+    return false;
+  }
+}
+
+/** JMeter 在失败样本或 report 目录告警时常见退出码 1，但 JTL/仪表板仍可用 */
+function softenJmeterExitCode(opts: {
+  exitCode: number | null;
+  cancelled: boolean;
+  stdout: string;
+  stderr: string;
+  jtlOk: boolean;
+  generateReport: boolean;
+}): { ok: boolean; warning?: string; error?: string } {
+  if (opts.cancelled) {
+    return { ok: false, error: "已取消" };
+  }
+  if (opts.exitCode === 0) {
+    return { ok: true };
+  }
+  const combined = `${opts.stderr}\n${opts.stdout}`;
+  const driverFatal = JMETER_DRIVER_FATAL.test(combined);
+  if (
+    !opts.jtlOk &&
+    /doesn't exist or can't be opened|找不到|无法打开/i.test(combined)
+  ) {
+    const pathHint = combined.match(/file\s+([^\s]+\.jmx)/i)?.[1] ?? combined.match(/([\w:\\/.-]+\.jmx)/i)?.[1];
+    return {
+      ok: false,
+      error: pathHint
+        ? `JMX 不存在或无法打开：${pathHint}`
+        : "JMX 文件不存在或无法打开，请检查路径是否正确",
+    };
+  }
+  if (driverFatal || !opts.jtlOk) {
+    const match = combined.match(JMETER_DRIVER_FATAL);
+    return {
+      ok: false,
+      error: match?.[0]?.trim() ?? `JMeter 异常结束（退出码 ${opts.exitCode ?? "?"}）`,
+    };
+  }
+  if (opts.exitCode === 1) {
+    const dashboardOk = /Dashboard generated/i.test(combined);
+    const reportWarn = /found non empty folder/i.test(combined);
+    if (opts.generateReport && dashboardOk) {
+      return {
+        ok: true,
+        warning: reportWarn
+          ? "JMeter 退出码 1（报告目录曾非空，已忽略并生成仪表板）。请检查是否有失败 HTTP 样本。"
+          : "JMeter 退出码 1。JTL/报告已生成，请检查是否有失败 HTTP 样本或断言错误。",
+      };
+    }
+    if (!opts.generateReport) {
+      return {
+        ok: true,
+        warning: "JMeter 退出码 1。JTL 已生成，请检查是否有失败 HTTP 样本。",
+      };
+    }
+  }
+  return {
+    ok: false,
+    error: `JMeter 异常结束（退出码 ${opts.exitCode ?? "?"}）`,
+  };
+}
+
 function defaultOutputDir(jmxPath: string): string {
   const base = path.dirname(jmxPath);
   const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
   return path.join(base, `run_${stamp}`);
 }
 
-/** Windows 上不能直接 spawn .bat，否则会抛出 spawn EINVAL */
+const JMETER_JAVA_OPENS = [
+  "--add-opens",
+  "java.desktop/sun.awt=ALL-UNNAMED",
+  "--add-opens",
+  "java.desktop/sun.swing=ALL-UNNAMED",
+  "--add-opens",
+  "java.base/java.lang=ALL-UNNAMED",
+  "--add-opens",
+  "java.base/java.util=ALL-UNNAMED",
+];
+
+function decodeJmeterOutput(buf: Buffer): string {
+  const utf8 = buf.toString("utf8");
+  if (!utf8.includes("\uFFFD")) return utf8;
+  try {
+    return new TextDecoder("gb18030").decode(buf);
+  } catch {
+    return utf8;
+  }
+}
+
+/** 优先 java -jar，避免 jmeter.bat 在错误时 pause 且退出码不稳定 */
 function spawnJmeter(
   jmeterBin: string,
   args: string[],
   options: SpawnOptions,
 ): ChildProcessWithoutNullStreams {
+  const jmeterHome = path.resolve(path.dirname(jmeterBin), "..");
+  const jar = path.join(jmeterHome, "bin", "ApacheJMeter.jar");
+  const env = options.env ?? process.env;
+  const javaHome = env.JAVA_HOME?.trim();
+  const javaExe = javaHome
+    ? path.join(javaHome, "bin", process.platform === "win32" ? "java.exe" : "java")
+    : process.platform === "win32"
+      ? "java.exe"
+      : "java";
+
+  if (fsSync.existsSync(jar) && (javaHome ? fsSync.existsSync(javaExe) : true)) {
+    const jvmExtra = env.JVM_ARGS?.trim() ? env.JVM_ARGS.trim().split(/\s+/) : [];
+    const jvmHeap = ["-Xms512m", "-Xmx1024m", "-XX:MaxMetaspaceSize=256m"];
+    return spawn(
+      javaExe,
+      [...jvmHeap, ...JMETER_JAVA_OPENS, ...jvmExtra, "-jar", jar, ...args],
+      { ...options, env: { ...env, JMETER_HOME: jmeterHome } },
+    ) as ChildProcessWithoutNullStreams;
+  }
+
   if (process.platform === "win32") {
     return spawn("cmd.exe", ["/d", "/s", "/c", jmeterBin, ...args], {
       ...options,
@@ -219,7 +344,6 @@ export async function runJmeterTest(opts: RunJmeterOptions, onLog?: JmeterLogSin
   await fs.mkdir(outputDir, { recursive: true });
   if (opts.generateReport !== false) {
     await fs.rm(reportDir, { recursive: true, force: true });
-    await fs.mkdir(reportDir, { recursive: true });
   }
 
   try {
@@ -312,11 +436,7 @@ export async function runJmeterTest(opts: RunJmeterOptions, onLog?: JmeterLogSin
     const child = spawnJmeter(detect.jmeterBin!, args, {
       cwd: outputDir,
       windowsHide: true,
-      env: {
-        ...process.env,
-        JMETER_HOME: detect.jmeterHome,
-        ...(jvmArgs ? { JVM_ARGS: jvmArgs } : {}),
-      },
+      env: jmeterProcessEnv(detect.jmeterHome!, jvmArgs ? { JVM_ARGS: jvmArgs } : undefined),
     });
     activeChild = child;
 
@@ -324,8 +444,8 @@ export async function runJmeterTest(opts: RunJmeterOptions, onLog?: JmeterLogSin
       void tailJmeterLogFile();
     }, 450);
 
-    child.stdout.on("data", (c: Buffer) => consumeProcessOutput(c.toString("utf8"), stdoutChunks));
-    child.stderr.on("data", (c: Buffer) => consumeProcessOutput(c.toString("utf8"), stderrChunks));
+    child.stdout.on("data", (c: Buffer) => consumeProcessOutput(decodeJmeterOutput(c), stdoutChunks));
+    child.stderr.on("data", (c: Buffer) => consumeProcessOutput(decodeJmeterOutput(c), stderrChunks));
     child.on("error", (err) => {
       stopTail();
       activeChild = null;
@@ -353,23 +473,41 @@ export async function runJmeterTest(opts: RunJmeterOptions, onLog?: JmeterLogSin
   const stderr = stderrChunks.join("");
   const cancelled = cancelRequested;
   cancelRequested = false;
-  const ok = !cancelled && exitCode === 0;
+  const jtlOk = await jtlLooksUsable(jtlPath);
+  const generateReport = opts.generateReport !== false;
 
+  let ok: boolean;
   let error: string | undefined;
-  if (!ok) {
-    if (cancelled) error = "已取消";
-    else if (abortReason) error = abortReason;
-    else {
+  let warning: string | undefined;
+
+  if (abortReason && !cancelled) {
+    ok = false;
+    error = abortReason;
+  } else {
+    const verdict = softenJmeterExitCode({
+      exitCode,
+      cancelled,
+      stdout,
+      stderr,
+      jtlOk,
+      generateReport,
+    });
+    ok = verdict.ok;
+    error = verdict.error;
+    warning = verdict.warning;
+    if (!ok && !error && !cancelled) {
       const combined = `${stderr}\n${stdout}`;
       const match = combined.match(/Error in NonGUIDriver[^\n]*|An error occurred:[^\n]*/i);
       error = match?.[0]?.trim() ?? `JMeter 异常结束（退出码 ${exitCode ?? "?"}）`;
     }
+    if (cancelled && !ok) error = "已取消";
   }
 
   return {
     ok,
     cancelled,
     exitCode,
+    warning,
     jmxPath,
     outputDir,
     jtlPath,

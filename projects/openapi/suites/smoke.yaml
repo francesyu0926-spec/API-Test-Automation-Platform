@@ -1,0 +1,7 @@
+name: smoke
+description: 冒烟套件
+cases:
+  - get-sale-overview-by-issuer-inst
+  - get-sale-prod-of-issuer-inst
+  - get-sale-overview-by-sale-inst
+  - get-sale-prod-of-sale-inst

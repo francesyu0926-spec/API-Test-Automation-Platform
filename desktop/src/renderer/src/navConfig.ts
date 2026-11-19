@@ -10,7 +10,8 @@ export const APP_TABS: {
   { id: "load", label: "负载测试", group: "dev", shortcut: "2" },
   { id: "capture", label: "抓包", group: "assets", shortcut: "3" },
   { id: "projects", label: "项目与用例", group: "assets", shortcut: "4" },
-  { id: "runs", label: "执行记录", group: "auto", shortcut: "5" },
+  { id: "suite", label: "套件执行", group: "auto", shortcut: "5" },
+  { id: "runs", label: "执行记录", group: "auto", shortcut: "6" },
 ];
 
 export const NAV_GROUP_LABELS: Record<(typeof APP_TABS)[number]["group"], string> = {

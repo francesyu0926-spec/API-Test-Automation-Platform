@@ -12,6 +12,13 @@ import {
 import ApiWorkbench from "./ApiWorkbench";
 import CasesPanel from "./CasesPanel";
 import CreateProjectDialog from "./CreateProjectDialog";
+import ImportOpenApiDialog from "./ImportOpenApiDialog";
+import {
+  applyOpenApiImportToRepo,
+  backfillProjectCasesFromCollections,
+  pickAndParseOpenApiFile,
+  type ParsedOpenApi,
+} from "./openapiImport";
 import CapturePanel from "./CapturePanel";
 import LoadTestPanel from "./LoadTestPanel";
 import ConfirmDialog from "./ConfirmDialog";
@@ -101,6 +108,10 @@ export default function App() {
   const [workbenchFromLoadTest, setWorkbenchFromLoadTest] = useState(false);
   const [createProjectOpen, setCreateProjectOpen] = useState(false);
   const [createProjectBaseUrlHint, setCreateProjectBaseUrlHint] = useState<string | undefined>();
+  const [importOpenApiOpen, setImportOpenApiOpen] = useState(false);
+  const [importOpenApiBusy, setImportOpenApiBusy] = useState(false);
+  const [importOpenApiParsed, setImportOpenApiParsed] = useState<ParsedOpenApi | null>(null);
+  const [importOpenApiSource, setImportOpenApiSource] = useState<string | undefined>();
   const [bootLoading, setBootLoading] = useState(true);
   const [assetsLoading, setAssetsLoading] = useState(false);
   const [runDetailLoading, setRunDetailLoading] = useState(false);
@@ -113,6 +124,7 @@ export default function App() {
   const [preferencesOpen, setPreferencesOpen] = useState(false);
   /** 项目与用例 · YAML 列表选中（提升到 App，避免面板内 effect 抢状态） */
   const [projectsActiveCase, setProjectsActiveCase] = useState<string | null>(null);
+  const [assetsReloadNonce, setAssetsReloadNonce] = useState(0);
 
   const refreshRuns = useCallback(async () => {
     const list = await window.atp.listRuns({ limit: 200 });
@@ -138,10 +150,34 @@ export default function App() {
       if (selectedProjectRef.current !== id) return;
       setAssets(a);
       setAssetsForProject(id);
+    } catch (err) {
+      if (selectedProjectRef.current !== id) return;
+      console.error("[refreshAssets]", err);
+      throw err;
     } finally {
       if (selectedProjectRef.current === id) setAssetsLoading(false);
     }
   }, [selectedProject]);
+
+  const refreshWorkspaceAssets = useCallback(async () => {
+    if (!selectedProject) {
+      notify("请先选择项目");
+      return;
+    }
+    try {
+      const backfill = await backfillProjectCasesFromCollections(selectedProject);
+      await refreshAssets();
+      const cols = await window.atp.listCollections(selectedProject);
+      setProjectCollections(cols);
+      setAssetsReloadNonce((n) => n + 1);
+      const parts = ["已刷新用例与集合"];
+      if (backfill.saved > 0) parts.push(`补写 ${backfill.saved} 个 YAML 用例`);
+      if (backfill.failed.length) parts.push(`${backfill.failed.length} 条补写失败`);
+      notify(parts.join(" · "));
+    } catch (err) {
+      notify(err instanceof Error ? err.message : "刷新失败");
+    }
+  }, [notify, refreshAssets, selectedProject]);
 
   const projectCaseNames = useMemo(() => {
     if (!selectedProject || assetsForProject !== selectedProject) return EMPTY_PROJECT_CASES;
@@ -237,11 +273,17 @@ export default function App() {
           if (a.suites.length && !a.suites.includes(prev)) return a.suites[0]!;
           return prev;
         });
+      } catch (err) {
+        if (selectedProjectRef.current !== id) return;
+        console.error("[listProjectAssets]", err);
+        notify(err instanceof Error ? err.message : "加载项目资源失败");
+        setAssets({ environments: ["dev"], suites: ["smoke"], cases: [], caseTexts: {} });
+        setAssetsForProject(id);
       } finally {
         if (selectedProjectRef.current === id) setAssetsLoading(false);
       }
     })();
-  }, [selectedProject]);
+  }, [selectedProject, notify]);
 
   const goTab = useCallback((next: AppTab) => {
     setTab(next);
@@ -417,6 +459,59 @@ export default function App() {
     })();
   };
 
+  const startImportOpenApi = useCallback(() => {
+    void (async () => {
+      const res = await pickAndParseOpenApiFile();
+      if (!res.ok) {
+        if (!res.cancelled && res.error) notify(res.error);
+        return;
+      }
+      setImportOpenApiParsed(res.data);
+      setImportOpenApiSource(res.filePath);
+      setImportOpenApiOpen(true);
+    })();
+  }, [notify]);
+
+  const submitImportOpenApi = (opts: {
+    projectId: string;
+    projectName: string;
+    baseUrl: string;
+    collectionId: string;
+    collectionName: string;
+  }) => {
+    void (async () => {
+      if (!importOpenApiParsed) return;
+      setImportOpenApiBusy(true);
+      const res = await applyOpenApiImportToRepo({
+        ...opts,
+        requests: importOpenApiParsed.requests,
+      });
+      setImportOpenApiBusy(false);
+      if (!res.ok || !res.projectId) {
+        notify(res.error ?? "导入失败");
+        return;
+      }
+      const count = importOpenApiParsed.requests.length;
+      setImportOpenApiOpen(false);
+      setImportOpenApiParsed(null);
+      setImportOpenApiSource(undefined);
+      await refreshProjects();
+      setSelectedProject(res.projectId);
+      await refreshAssets();
+      const casePart =
+        res.casesSaved != null
+          ? ` · 已写入 ${res.casesSaved} 个 YAML 用例（套件 smoke）`
+          : "";
+      const failPart =
+        res.casesFailed?.length ?
+          ` · ${res.casesFailed.length} 条用例写入失败`
+        : "";
+      notify(`已从 OpenAPI 导入 ${count} 条请求${casePart}${failPart} · 项目「${opts.projectName}」`);
+      setSuiteTargetsReload((n) => n + 1);
+      goTab("projects");
+    })();
+  };
+
   const appVm: AppViewModel = {
     tab,
     goTab,
@@ -431,6 +526,7 @@ export default function App() {
     setSuite,
     assets,
     assetsLoading,
+    assetsForProject,
     projectCasesReady,
     projectCaseNames,
     projectCaseTexts,
@@ -448,6 +544,8 @@ export default function App() {
     clearRunSelection,
     onRunsDeleted,
     refreshAssets,
+    refreshWorkspaceAssets,
+    assetsReloadNonce,
     refreshRuns,
     suiteTargetsReload,
     setSuiteTargetsReload,
@@ -482,6 +580,15 @@ export default function App() {
     deleteCurrentProject,
     submitCreateProject,
     runs,
+    importOpenApiOpen,
+    setImportOpenApiOpen,
+    importOpenApiBusy,
+    importOpenApiParsed,
+    setImportOpenApiParsed,
+    importOpenApiSource,
+    setImportOpenApiSource,
+    startImportOpenApi,
+    submitImportOpenApi,
   };
 
   return (
@@ -509,6 +616,7 @@ function AppShell() {
     setSuite,
     assets,
     assetsLoading,
+    assetsForProject,
     projectCasesReady,
     projectCaseNames,
     projectCaseTexts,
@@ -526,6 +634,8 @@ function AppShell() {
     clearRunSelection,
     onRunsDeleted,
     refreshAssets,
+    refreshWorkspaceAssets,
+    assetsReloadNonce,
     refreshRuns,
     suiteTargetsReload,
     setSuiteTargetsReload,
@@ -560,6 +670,15 @@ function AppShell() {
     deleteCurrentProject,
     submitCreateProject,
     runs,
+    importOpenApiOpen,
+    setImportOpenApiOpen,
+    importOpenApiBusy,
+    importOpenApiParsed,
+    setImportOpenApiParsed,
+    importOpenApiSource,
+    setImportOpenApiSource,
+    startImportOpenApi,
+    submitImportOpenApi,
   } = vm as {
     tab: AppTab;
     goTab: (next: AppTab) => void;
@@ -579,6 +698,7 @@ function AppShell() {
       caseTexts: Record<string, string>;
     } | null;
     assetsLoading: boolean;
+    assetsForProject: string | null;
     projectCasesReady: boolean;
     projectCaseNames: string[];
     projectCaseTexts: Record<string, string>;
@@ -606,6 +726,8 @@ function AppShell() {
     clearRunSelection: () => void;
     onRunsDeleted: (deletedIds: string[]) => void;
     refreshAssets: () => Promise<void>;
+    refreshWorkspaceAssets: () => Promise<void>;
+    assetsReloadNonce: number;
     refreshRuns: () => Promise<void>;
     suiteTargetsReload: number;
     workbenchDraft: WorkbenchDraft | null;
@@ -639,10 +761,26 @@ function AppShell() {
     deleteCurrentProject: () => Promise<void>;
     submitCreateProject: (opts: { id: string; name: string; baseUrl: string }) => void;
     runs: RunRow[];
+    importOpenApiOpen: boolean;
+    setImportOpenApiOpen: (o: boolean) => void;
+    importOpenApiBusy: boolean;
+    importOpenApiParsed: ParsedOpenApi | null;
+    setImportOpenApiParsed: (p: ParsedOpenApi | null) => void;
+    importOpenApiSource: string | undefined;
+    setImportOpenApiSource: (s: string | undefined) => void;
+    startImportOpenApi: () => void;
+    submitImportOpenApi: (opts: {
+      projectId: string;
+      projectName: string;
+      baseUrl: string;
+      collectionId: string;
+      collectionName: string;
+    }) => void;
   };
 
-  const { envName: env, setEnvName: setEnv, variablesLoading } = useProjectEnv();
-  const workspacePending = Boolean(selectedProject && (assetsLoading || variablesLoading));
+  const { envName: env, setEnvName: setEnv } = useProjectEnv();
+  /** 仅切换项目且磁盘资源尚未对齐时全屏「切换工作区」；日常刷新不遮挡 */
+  const workspacePending = Boolean(selectedProject && assetsForProject !== selectedProject);
 
   const onRun = async (targets: SuiteRunTarget[]) => {
     if (!selectedProject) return;
@@ -687,11 +825,10 @@ function AppShell() {
       // 非 JSON 输出，走下方降级展示
     }
     if (!runView) {
-      const raw = [stdout, stderr].filter(Boolean).join("\n");
+      const raw = stdout || stderr || "";
       runView = {
         summary: null,
         steps: [],
-        stderr: stderr || undefined,
         rawLog: raw || (result.code === 0 ? "执行成功" : "执行失败"),
       };
     } else if (runView.summary && typeof runView.summary === "object") {
@@ -747,6 +884,16 @@ function AppShell() {
               />
               <button
                 type="button"
+                className="workbench-icon-btn workbench-icon-btn--muted sidebar-workspace-icon"
+                disabled={!selectedProject || bootLoading || assetsLoading}
+                title="刷新用例与集合（缺失时从 API 集合补写 YAML）"
+                aria-label="刷新用例与集合"
+                onClick={() => void refreshWorkspaceAssets()}
+              >
+                ↻
+              </button>
+              <button
+                type="button"
                 className="workbench-icon-btn sidebar-workspace-icon"
                 title="新建项目"
                 aria-label="新建项目"
@@ -758,8 +905,8 @@ function AppShell() {
                 type="button"
                 className="workbench-icon-btn workbench-icon-btn--muted sidebar-workspace-icon"
                 disabled={!selectedProject}
-                title="管理项目"
-                aria-label="管理项目"
+                title="打开项目与用例"
+                aria-label="打开项目与用例"
                 onClick={() => goTab("projects")}
               >
                 ⚙
@@ -868,6 +1015,7 @@ function AppShell() {
                 running={running}
                 reloadKey={suiteTargetsReload}
                 onRun={(items) => void onRun(items)}
+                onImportOpenApi={() => startImportOpenApi()}
               />
             </Card>
 
@@ -898,7 +1046,7 @@ function AppShell() {
                 ) : (
                   <p className="hint run-suite-run-fallback-title">无法解析结构化结果，以下为原始输出。</p>
                 )}
-                {lastSuiteRun.stderr ? (
+                {lastSuiteRun.stderr && lastSuiteRun.summary ? (
                   <pre className="run-suite-run-stderr" role="alert">
                     {lastSuiteRun.stderr}
                   </pre>
@@ -963,6 +1111,11 @@ function AppShell() {
                   setCreateProjectOpen(true);
                 }}
               />
+              <div className="workspace-empty-actions" style={{ justifyContent: "center", marginTop: 16 }}>
+                <button type="button" className="nav-btn" onClick={() => startImportOpenApi()}>
+                  从 OpenAPI 导入
+                </button>
+              </div>
               </>
             ) : (
               <>
@@ -998,6 +1151,13 @@ function AppShell() {
                       <button
                         type="button"
                         className="nav-btn nav-btn--compact nav-btn--ghost"
+                        onClick={() => startImportOpenApi()}
+                      >
+                        OpenAPI 导入
+                      </button>
+                      <button
+                        type="button"
+                        className="nav-btn nav-btn--compact nav-btn--ghost"
                         disabled={!selectedProject || projectDeleteBusy}
                         onClick={() => setPendingProjectDelete(true)}
                       >
@@ -1026,6 +1186,7 @@ function AppShell() {
                     activeCaseName={projectsActiveCase}
                     onActiveCaseNameChange={setProjectsActiveCase}
                     onRefresh={() => void refreshAssets()}
+                    reloadNonce={assetsReloadNonce}
                     onNotify={notify}
                     onCasePreviewChange={handleCasePreviewChange}
                     onOpenInWorkbench={(draft, opts) => openDraftInWorkbench(draft, opts)}
@@ -1093,6 +1254,12 @@ function AppShell() {
               openDraftInWorkbench(draft);
               notify("已在工作台打开；编辑 Headers/Params 后点「应用到压测」");
             }}
+            onFocusProjectSelect={() => {
+              const el = document.querySelector<HTMLElement>(".sidebar-workspace-select");
+              el?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+              el?.classList.add("sidebar-workspace-select--pulse");
+              window.setTimeout(() => el?.classList.remove("sidebar-workspace-select--pulse"), 2400);
+            }}
           />
           </div>
         )}
@@ -1111,6 +1278,20 @@ function AppShell() {
         suggestedBaseUrl={createProjectBaseUrlHint}
         onCancel={() => setCreateProjectOpen(false)}
         onCreate={submitCreateProject}
+      />
+
+      <ImportOpenApiDialog
+        open={importOpenApiOpen}
+        busy={importOpenApiBusy}
+        sourceFile={importOpenApiSource}
+        parsed={importOpenApiParsed}
+        onCancel={() => {
+          if (importOpenApiBusy) return;
+          setImportOpenApiOpen(false);
+          setImportOpenApiParsed(null);
+          setImportOpenApiSource(undefined);
+        }}
+        onImport={submitImportOpenApi}
       />
 
       <ConfirmDialog

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 
-import type { SuiteRunTarget } from "./resolveSuiteRunTargets";
 import AppCustomSelect from "./AppCustomSelect";
+import type { SuiteRunTarget } from "./resolveSuiteRunTargets";
 
 type Project = { id: string; name: string };
 
@@ -17,6 +17,7 @@ type Props = {
   running: boolean;
   reloadKey?: number;
   onRun: (targets: SuiteRunTarget[]) => void;
+  onImportOpenApi?: () => void;
 };
 
 export default function RunSuitePanel({
@@ -31,6 +32,7 @@ export default function RunSuitePanel({
   running,
   reloadKey = 0,
   onRun,
+  onImportOpenApi,
 }: Props) {
   const [targets, setTargets] = useState<SuiteRunTarget[]>([]);
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(() => new Set());
@@ -89,27 +91,42 @@ export default function RunSuitePanel({
   return (
     <div className="run-suite-panel">
       <div className="toolbar run-suite-toolbar">
-        <select value={selectedProject} onChange={(e) => onProject(e.target.value)}>
-          {projects.map((p) => (
-            <option key={p.id} value={p.id}>
-              {p.name}
-            </option>
-          ))}
-        </select>
-        <select value={suite} onChange={(e) => onSuite(e.target.value)}>
-          {(assets?.suites ?? [suite]).map((s) => (
-            <option key={s} value={s}>
-              {s}
-            </option>
-          ))}
-        </select>
-        <select value={env} onChange={(e) => onEnv(e.target.value)}>
-          {(assets?.environments ?? [env]).map((e) => (
-            <option key={e} value={e}>
-              {e}
-            </option>
-          ))}
-        </select>
+        <AppCustomSelect
+          className="run-suite-toolbar-picker"
+          variant="control"
+          value={selectedProject}
+          ariaLabel="项目"
+          disabled={!projects.length}
+          placeholder={!projects.length ? "暂无项目" : undefined}
+          options={projects.map((p) => ({ value: p.id, label: p.name, title: p.name }))}
+          onChange={onProject}
+        />
+        <AppCustomSelect
+          className="run-suite-toolbar-picker"
+          variant="control"
+          value={suite}
+          ariaLabel="套件"
+          options={(assets?.suites ?? [suite]).map((s) => ({ value: s, label: s }))}
+          onChange={onSuite}
+        />
+        <AppCustomSelect
+          className="run-suite-toolbar-picker"
+          variant="control"
+          value={env}
+          ariaLabel="环境"
+          options={(assets?.environments ?? [env]).map((name) => ({ value: name, label: name }))}
+          onChange={onEnv}
+        />
+        {onImportOpenApi ? (
+          <button
+            type="button"
+            className="nav-btn"
+            disabled={running}
+            onClick={onImportOpenApi}
+          >
+            OpenAPI 导入
+          </button>
+        ) : null}
         <button
           type="button"
           className="primary"

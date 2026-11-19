@@ -1,3 +1,4 @@
 name: smoke
 description: 冒烟套件
-cases: []
+cases:
+  - paymenterrorhandler

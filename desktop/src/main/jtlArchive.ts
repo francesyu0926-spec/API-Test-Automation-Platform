@@ -1,4 +1,5 @@
 import type { HttpBenchmarkReport } from "../shared/apiWorkbenchTypes";
+import { resolvePerfArchiveProjectId } from "../shared/perfProject";
 import { jtlAggregateToRunBenchmarkReport } from "../shared/jtlArchiveFromAggregate";
 import { findJmxFilesNearJtl } from "./projectFs";
 import * as perfReports from "./perfReportStore";
@@ -14,7 +15,7 @@ export async function archiveJtlFileToPerf(
   mode?: JtlStreamModeId | null,
 ): Promise<{ ok: boolean; error?: string; relativePath?: string; report?: HttpBenchmarkReport }> {
   const p = jtlPath.trim();
-  if (!projectId?.trim()) return { ok: false, error: "未选择项目" };
+  const resolvedProject = resolvePerfArchiveProjectId(projectId);
   if (!p) return { ok: false, error: "JTL 路径为空" };
 
   let agg;
@@ -45,11 +46,11 @@ export async function archiveJtlFileToPerf(
   const report = jtlAggregateToRunBenchmarkReport(agg, {
     sourceJtl: p,
     jmxPath: resolvedJmx,
-    projectId,
+    projectId: resolvedProject,
   });
   if (!report) return { ok: false, error: "无法从 JTL 生成压测报告" };
 
-  const saved = await perfReports.savePerfReport(projectId, report, undefined, null);
+  const saved = await perfReports.savePerfReport(resolvedProject, report, undefined, null);
   if (!saved.ok) return { ok: false, error: saved.error ?? "保存失败" };
   return { ok: true, relativePath: saved.relativePath, report };
 }

@@ -756,7 +756,7 @@ export default function RunsHistoryTable({
             {!runs.length && (
               <tr>
                 <td colSpan={6} className="run-history-empty">
-                  尚无执行记录，请前往左侧「运行套件」执行。
+                  尚无执行记录，请前往左侧「套件执行」(Alt+5) 运行用例。
                 </td>
               </tr>
             )}

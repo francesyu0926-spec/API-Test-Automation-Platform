@@ -9,6 +9,71 @@ import { runPython } from "./pythonRun";
 
 const CASE_REQUEST_PREFIX = "case:";
 
+const CASE_DESCRIPTION_BOILERPLATE = new Set([
+  "由 OpenAPI 导入",
+  "由 API 工作台生成",
+  "由抓包生成",
+]);
+
+function looksLikeFileStem(name: string, id: string): boolean {
+  return name === id || /^[a-z0-9]+(?:-[a-z0-9]+)*$/i.test(name);
+}
+
+function caseDisplayLabel(doc: { name?: string; description?: string } | undefined, id: string): string {
+  const name = doc?.name?.trim();
+  const desc = doc?.description?.trim();
+  if (name && desc && !CASE_DESCRIPTION_BOILERPLATE.has(desc) && looksLikeFileStem(name, id)) {
+    return desc;
+  }
+  if (name) return name;
+  if (desc && !CASE_DESCRIPTION_BOILERPLATE.has(desc)) return desc;
+  return id;
+}
+
+function requestPathForMatch(url: string): string {
+  const path = url
+    .trim()
+    .toLowerCase()
+    .replace(/^\{\{[^}]+\}\}/i, "")
+    .replace(/^https?:\/\/[^/]+/i, "")
+    .split("?")[0]
+    .replace(/\/+$/, "");
+  if (!path) return "/";
+  return path.startsWith("/") ? path : `/${path}`;
+}
+
+function suiteRequestFingerprint(method: string, url: string): string {
+  return `${method.trim().toUpperCase()} ${requestPathForMatch(url)}`;
+}
+
+function slugCaseStem(raw: string): string {
+  const s = raw
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return s.slice(0, 48);
+}
+
+/** 与 renderer caseYaml.caseNameFromTemplatedUrl 对齐，用于集合请求与 suite cases 去重 */
+function caseStemFromUrl(url: string): string {
+  const trimmed = url.trim();
+  if (!trimmed) return "";
+  try {
+    const u = new URL(trimmed);
+    const parts = u.pathname.split("/").filter(Boolean);
+    const last = parts[parts.length - 1]?.replace(/\{[^}]+\}/g, "") ?? "";
+    return slugCaseStem(last) || slugCaseStem(u.hostname.replace(/\./g, "-"));
+  } catch {
+    const withoutQuery = trimmed.split("?")[0] ?? trimmed;
+    const pathOnly = withoutQuery
+      .replace(/^\{\{[^}]+\}\}/i, "")
+      .replace(/^https?:\/\/[^/]+/i, "");
+    const norm = pathOnly.startsWith("/") ? pathOnly : `/${pathOnly}`;
+    const last = norm.split("/").filter(Boolean).pop()?.replace(/\{[^}]+\}/g, "") ?? "";
+    return slugCaseStem(last);
+  }
+}
+
 export type SuiteRunTarget =
   | { kind: "case"; key: string; id: string; label: string }
   | {
@@ -176,14 +241,26 @@ export async function listSuiteRunTargets(
   const suite = await getSuiteCases(projectId, suiteName);
   const suiteCaseSet = new Set(suite.cases);
   const targets: SuiteRunTarget[] = [];
+  const suiteFingerprints = new Set<string>();
+  const suiteStems = new Set(suite.cases);
 
   for (const id of suite.cases) {
     let label = id;
     const casePath = path.join(getRepoRoot(), "projects", projectId, "cases", `${id}.yaml`);
     try {
       const text = await fs.readFile(casePath, "utf8");
-      const doc = yaml.load(text) as { name?: string; description?: string };
-      label = String(doc.description ?? doc.name ?? id);
+      const doc = yaml.load(text) as {
+        name?: string;
+        description?: string;
+        request?: { method?: string; url?: string };
+      };
+      label = caseDisplayLabel(doc, id);
+      const caseUrl = doc.request?.url;
+      const caseMethod = doc.request?.method;
+      if (typeof caseUrl === "string" && caseUrl.trim()) {
+        const method = typeof caseMethod === "string" && caseMethod.trim() ? caseMethod : "GET";
+        suiteFingerprints.add(suiteRequestFingerprint(method, caseUrl));
+      }
     } catch {
       // keep id
     }
@@ -219,6 +296,10 @@ export async function listSuiteRunTargets(
         }
         continue;
       }
+      const linkedStem = req.caseStem?.trim() || caseStemFromUrl(req.url);
+      if (linkedStem && suiteStems.has(linkedStem)) continue;
+      const reqUrl = req.url?.trim();
+      if (reqUrl && suiteFingerprints.has(suiteRequestFingerprint(req.method, reqUrl))) continue;
       targets.push({
         kind: "collection",
         key: `col:${collectionId}:${req.id}`,
@@ -438,9 +519,25 @@ export function runSuite(options: {
   return runPython(args);
 }
 
-export async function getWorkspaceInfo(): Promise<{ repoRoot: string; python: string }> {
+export async function getWorkspaceInfo(): Promise<{
+  repoRoot: string;
+  python: string;
+  runtimeEdition: "full" | "standard";
+  bundledPython: boolean;
+  bundledJre: boolean;
+  bundledJmeter: boolean;
+}> {
   const repoRoot = getRepoRoot();
-  return { repoRoot, python: pythonExecutable(repoRoot) };
+  const { bundledRuntimeSummary } = await import("./bundledRuntime");
+  const br = bundledRuntimeSummary();
+  return {
+    repoRoot,
+    python: pythonExecutable(repoRoot),
+    runtimeEdition: br.edition,
+    bundledPython: br.python,
+    bundledJre: br.jre,
+    bundledJmeter: br.jmeter,
+  };
 }
 
 export async function getProjectVariables(

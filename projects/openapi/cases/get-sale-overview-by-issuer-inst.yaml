@@ -1,0 +1,13 @@
+name: get-sale-overview-by-issuer-inst
+description: 获取代销概览-发行机构
+request:
+  method: POST
+  url: "{{base_url}}/data/product/stats/sale/get_sale_overview_by_issuer_inst"
+  headers:
+    Content-Type: "application/json"
+  body: {"issuerInstIds":["ICI01IN0032"],"sort":"relatedSaleProdCount-Asc","pageCurrent":1,"pageSize":1}
+assertions:
+  - type: status
+    equals: 200
+  - type: duration_ms
+    max: 30000

@@ -32,7 +32,14 @@ export type CaptureTxIndexRow = {
 };
 
 export type AtpApi = {
-  getWorkspace: () => Promise<{ repoRoot: string; python: string }>;
+  getWorkspace: () => Promise<{
+    repoRoot: string;
+    python: string;
+    runtimeEdition?: "full" | "standard";
+    bundledPython?: boolean;
+    bundledJre?: boolean;
+    bundledJmeter?: boolean;
+  }>;
   setRepoRoot: (root: string) => Promise<{ repoRoot: string; python: string }>;
   listProjects: () => Promise<
     Array<{
@@ -189,6 +196,7 @@ export type AtpApi = {
   copyChromeRestart: () => Promise<{ ok: boolean; message: string }>;
   copyText: (text: string) => Promise<{ ok: boolean }>;
   openMitmIt: () => Promise<void>;
+  openProductManual: () => Promise<string>;
   stopAllCapture: (closeSession: boolean) => Promise<{ message: string }>;
   restoreNetworkOnly: () => Promise<{ message: string }>;
   ensureNetworkDirect: () => Promise<{ recovered: boolean; messages: string[] }>;
@@ -345,6 +353,7 @@ export type AtpApi = {
     stdout: string;
     stderr: string;
     error?: string;
+    warning?: string;
   }>;
   cancelJmeter: () => Promise<{ ok: boolean }>;
   onJmeterLog: (handler: (ev: { text: string }) => void) => () => void;
@@ -409,6 +418,7 @@ const api: AtpApi = {
   copyChromeRestart: () => ipcRenderer.invoke("atp:copyChromeRestart"),
   copyText: (text) => ipcRenderer.invoke("atp:copyText", text),
   openMitmIt: () => ipcRenderer.invoke("atp:openMitmIt"),
+  openProductManual: () => ipcRenderer.invoke("atp:openProductManual"),
   stopAllCapture: (closeSession) => ipcRenderer.invoke("atp:stopAllCapture", closeSession),
   restoreNetworkOnly: () => ipcRenderer.invoke("atp:restoreNetworkOnly"),
   ensureNetworkDirect: () => ipcRenderer.invoke("atp:ensureNetworkDirect"),
