@@ -1268,6 +1268,67 @@ body {
   width: 100%;
 }
 
+.capture-startup-issue {
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid rgb(255 255 255 / 0.1);
+  background: rgb(30 30 36 / 0.95);
+}
+
+.capture-startup-issue--error {
+  border-color: rgb(220 80 80 / 0.45);
+  background: rgb(48 28 32 / 0.9);
+}
+
+.capture-startup-issue--warn {
+  border-color: rgb(230 160 60 / 0.45);
+  background: rgb(48 40 24 / 0.9);
+}
+
+.capture-startup-issue--info {
+  border-color: rgb(100 140 220 / 0.35);
+}
+
+.capture-startup-issue__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.capture-startup-issue__stage {
+  font-size: 12px;
+  font-weight: 600;
+  color: rgb(255 255 255 / 0.88);
+}
+
+.capture-startup-issue__code {
+  font-size: 10px;
+  font-family: ui-monospace, monospace;
+  color: rgb(255 255 255 / 0.45);
+}
+
+.capture-startup-issue__msg {
+  margin: 0 0 8px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: rgb(255 255 255 / 0.78);
+}
+
+.capture-startup-issue__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.capture-startup-issue__actions .nav-btn {
+  text-decoration: none;
+}
+
+.capture-startup-issue__actions .nav-btn:hover {
+  text-decoration: none;
+}
+
 .capture-session-brief {
   margin: 0;
   font-size: 12px;
@@ -5143,6 +5204,69 @@ button.primary.danger:disabled {
   display: flex;
   flex-direction: column;
   gap: 10px;
+}
+
+.capture-recording-banner {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 16px;
+  background: linear-gradient(90deg, #4a1518 0%, #3d1a10 48%, #2e1810 100%);
+  border-bottom: 1px solid rgb(255 120 80 / 0.45);
+  color: #ffd4c8;
+  font-size: 13px;
+  line-height: 1.45;
+  z-index: 120;
+}
+
+.capture-recording-banner-dot {
+  flex-shrink: 0;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #ff3b30;
+  box-shadow: 0 0 0 3px rgb(255 59 48 / 0.28);
+  animation: capture-recording-pulse 1.6s ease-in-out infinite;
+}
+
+.capture-recording-banner-text {
+  margin: 0;
+  flex: 1;
+}
+
+.capture-recording-banner-action {
+  display: inline;
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: none;
+  color: #ffb49a;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  text-decoration: none;
+}
+
+.capture-recording-banner-action:hover:not(:disabled) {
+  color: #ffe2d6;
+}
+
+.capture-recording-banner-action:disabled {
+  opacity: 0.65;
+  cursor: wait;
+}
+
+@keyframes capture-recording-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.72;
+    transform: scale(0.92);
+  }
 }
 
 .capture-req-banner {

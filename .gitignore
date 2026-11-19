@@ -7,6 +7,8 @@
 # Runtime output (optional: commit summaries only)
 runs/
 captures/
+data/capture_proxy_backup.json
+data/capture_proxy_guard.stop
 
 # Electron desktop
 desktop/node_modules/

@@ -11,6 +11,12 @@ import { runPython, spawnPythonDetached } from "./pythonRun";
 import { hostsForPac, parseCaptureHostList } from "./captureHosts";
 import { probeHttpsViaMitm } from "./captureProbe";
 import { stopPacHttpServer, startPacHttpServer } from "./pacHttp";
+import {
+  hasActiveCaptureProxyBackup,
+  restoreCaptureProxyFromBackup,
+  writeCaptureProxyBackup,
+} from "./captureProxyBackup";
+import { startCaptureProxyWatchdog, stopCaptureProxyWatchdog } from "./captureProxyGuard";
 import { disablePacProxy, enablePacProxy, writeEmbeddedWebPacFile, writePacFile } from "./pacProxy";
 import {
   forceDisableSystemProxy,
@@ -385,14 +391,59 @@ export function sendTestTransaction(
   });
 }
 
-export function stopIngestOnQuit(): void {
+/** 关机 / 注销 / 退出：优先恢复系统代理与 WinHTTP */
+export async function shutdownCaptureAndRestoreNetwork(): Promise<void> {
+  if (shutdownCaptureRestoreStarted) return;
+  shutdownCaptureRestoreStarted = true;
   if (ingestState) {
-    ingestState.process.kill();
+    try {
+      ingestState.process.kill();
+    } catch {
+      /* ignore */
+    }
     ingestState = null;
   }
-  void stopMitm();
-  void forceDisableSystemProxy();
-  void stopPacHttpServer();
+  await stopMitm();
+}
+
+export function stopIngestOnQuit(): void {
+  void shutdownCaptureAndRestoreNetwork();
+}
+
+export const ABNORMAL_CAPTURE_EXIT_MESSAGE =
+  "检测到上次抓包异常退出，已自动为您恢复系统网络设置。";
+
+let coldStartCaptureRecoveryDone = false;
+let shutdownCaptureRestoreStarted = false;
+
+/** 冷启动：优先检查代理备份（异常退出），再处理残留系统代理 */
+export async function recoverCaptureOnColdStart(mitmPort = 8888): Promise<{
+  abnormalExit: boolean;
+  messages: string[];
+}> {
+  if (coldStartCaptureRecoveryDone) {
+    return { abnormalExit: false, messages: [] };
+  }
+  coldStartCaptureRecoveryDone = true;
+
+  const messages: string[] = [];
+  if (await hasActiveCaptureProxyBackup()) {
+    await stopCaptureProxyWatchdog();
+    await stopPacHttpServer();
+    const restored = await restoreCaptureProxyFromBackup();
+    messages.push(
+      restored.ok
+        ? ABNORMAL_CAPTURE_EXIT_MESSAGE
+        : `检测到上次抓包异常退出，恢复网络失败：${restored.message}`,
+    );
+    const stale = await recoverStaleCaptureProxy(mitmPort);
+    if (stale) messages.push(stale);
+    return { abnormalExit: true, messages };
+  }
+
+  const note = await recoverStaleCaptureProxy(mitmPort);
+  if (note) messages.push(note);
+  return { abnormalExit: false, messages };
 }
 
 /** 启动时：MITM 未监听但系统/WinHTTP 仍走 ATP 代理时，自动恢复上网（避免桌面客户端一直 Connecting） */
@@ -423,13 +474,21 @@ export async function recoverStaleCaptureProxy(mitmPort = 8888): Promise<string 
 }
 
 export async function ensureNetworkDirect(mitmPort = 8888): Promise<{ recovered: boolean; messages: string[] }> {
-  const note = await recoverStaleCaptureProxy(mitmPort);
-  if (note) return { recovered: true, messages: [note] };
-  return { recovered: false, messages: [] };
+  const r = await recoverCaptureOnColdStart(mitmPort);
+  return { recovered: r.messages.length > 0, messages: r.messages };
+}
+
+export function isCaptureRecordingActive(): boolean {
+  return getMitmStatus().running;
 }
 
 export async function restoreNetworkOnly(): Promise<{ message: string }> {
-  await stopMitm();
+  const { proxyRestore } = await stopMitm();
+  if (proxyRestore?.trim()) {
+    return {
+      message: `${proxyRestore}。若客户端仍显示 Connecting，请完全退出该应用后重开。`,
+    };
+  }
   const net = await forceDisableSystemProxy();
   await stopPacHttpServer();
   const winHttp = await getWinHttpProxyStatus();
@@ -501,6 +560,7 @@ function mitmManualCommand(binary: string, root: string, listenPort: number): st
 
 /** 停止残留 MITM/Ingest，避免端口占用导致「开始抓包」失败 */
 export async function releaseCaptureRuntime(): Promise<void> {
+  await stopCaptureProxyWatchdog();
   if (mitmState) {
     try {
       mitmState.process.kill();
@@ -592,8 +652,12 @@ export async function startMitm(options: {
   mitmChild.on("exit", () => {
     if (mitmState?.process === mitmChild) {
       mitmState = null;
-      disablePacProxy();
-      void restoreWindowsSystemProxy();
+      void restoreCaptureProxyFromBackup().then((r) => {
+        if (!r.ok) {
+          disablePacProxy();
+          void restoreWindowsSystemProxy();
+        }
+      });
     }
   });
 
@@ -617,6 +681,10 @@ export async function startMitm(options: {
 
   let systemProxyMessage: string | undefined;
   if (options.setSystemProxy !== false) {
+    await writeCaptureProxyBackup();
+    const rollbackProxy = async () => {
+      await restoreCaptureProxyFromBackup();
+    };
     const usePac = options.proxyMode !== "global";
     if (usePac) {
       const bypassInput = options.pacHosts?.trim() || options.hostFilter?.trim() || "";
@@ -631,6 +699,7 @@ export async function startMitm(options: {
         if (!pacList.length) {
           mitmChild.kill();
           mitmState = null;
+          await rollbackProxy();
           return { ok: false, error: "PAC 模式下请填写要快照的 API 域名（逗号分隔）" };
         }
         try {
@@ -638,6 +707,7 @@ export async function startMitm(options: {
         } catch (e) {
           mitmChild.kill();
           mitmState = null;
+          await rollbackProxy();
           return { ok: false, error: e instanceof Error ? e.message : String(e) };
         }
       }
@@ -646,6 +716,7 @@ export async function startMitm(options: {
       if (!pacHttp.ok || !pacHttp.url) {
         mitmChild.kill();
         mitmState = null;
+        await rollbackProxy();
         return { ok: false, error: pacHttp.error ?? "PAC 本地服务启动失败" };
       }
       const r = enablePacProxy(pacHttp.url);
@@ -661,6 +732,7 @@ export async function startMitm(options: {
       if (!r.ok) {
         mitmChild.kill();
         mitmState = null;
+        await rollbackProxy();
         return { ok: false, error: r.message };
       }
     } else {
@@ -669,8 +741,13 @@ export async function startMitm(options: {
       if (!r.ok) {
         mitmChild.kill();
         mitmState = null;
+        await rollbackProxy();
         return { ok: false, error: r.message };
       }
+    }
+    const mitmPid = mitmChild.pid ?? 0;
+    if (mitmPid > 0) {
+      await startCaptureProxyWatchdog(mitmPid);
     }
   }
   return { ok: true, proxy: `127.0.0.1:${listenPort}`, systemProxyMessage };
@@ -698,6 +775,8 @@ export async function quickCaptureStart(options: {
   sessionId?: string;
   setSystemProxy?: boolean;
   proxyMode?: "pac" | "global" | "embedded";
+  listenPort?: number;
+  autoSwitchPort?: boolean;
 }): Promise<{
   ok: boolean;
   sessionId?: string;
@@ -705,8 +784,23 @@ export async function quickCaptureStart(options: {
   mitmProxy?: string;
   error?: string;
   messages: string[];
+  startup?: import("./captureStartupPipeline").CaptureStartupCheck;
 }> {
   const messages: string[] = [];
+  const { runCaptureStartupPipeline } = await import("./captureStartupPipeline");
+  const pipeline = await runCaptureStartupPipeline({
+    preferredPort: options.listenPort ?? 8888,
+    autoSwitchPort: options.autoSwitchPort ?? false,
+    autoKillZombieMitm: true,
+  });
+  if (!pipeline.ok) {
+    return { ok: false, error: pipeline.message, messages, startup: pipeline };
+  }
+  const listenPort = pipeline.listenPort;
+  if (listenPort !== (options.listenPort ?? 8888)) {
+    messages.push(`已自动切换 MITM 端口为 ${listenPort}。`);
+  }
+
   let sessionId = options.sessionId;
   if (!sessionId) {
     const started = await captureStart(options.project, options.label ?? "");
@@ -736,16 +830,17 @@ export async function quickCaptureStart(options: {
     setSystemProxy: options.setSystemProxy,
     proxyMode: options.proxyMode,
     pacHosts: options.hostFilter,
+    listenPort,
   });
   if (!mitm.ok) {
     await captureServeStop(false);
-    return { ok: false, error: mitm.error, sessionId, messages };
+    return { ok: false, error: mitm.error, sessionId, messages, startup: pipeline };
   }
   messages.push(`MITM ${mitm.proxy}`);
   if (mitm.systemProxyMessage) messages.push(mitm.systemProxyMessage);
 
   await new Promise((r) => setTimeout(r, 500));
-  const baidu = probeHttpsViaMitm("https://www.baidu.com/", 8888);
+  const baidu = probeHttpsViaMitm("https://www.baidu.com/", listenPort);
   const mitmRows = await countMitmIngestedTransactions(options.project, sessionId);
   if (baidu.ok) {
     if (mitmRows > 0) {
@@ -768,32 +863,45 @@ export async function quickCaptureStart(options: {
     messages.push("系统代理未开启，浏览器不会经 MITM。");
   }
 
+  messages.push(`抓包已开启 (127.0.0.1:${listenPort})，请重启目标程序后开始录制。`);
   return {
     ok: true,
     sessionId,
     ingestUrl: ingest.url,
     mitmProxy: mitm.proxy,
     messages,
+    startup: {
+      ok: true,
+      code: "OK_READY",
+      stage: 4,
+      message: `抓包已开启 (127.0.0.1:${listenPort})，请重启目标程序。`,
+      listenPort,
+      actions: [],
+    },
   };
 }
 
 export async function stopMitm(): Promise<{ proxyRestore?: string }> {
+  await stopCaptureProxyWatchdog();
   if (mitmState) {
     mitmState.process.kill();
     mitmState = null;
   }
-  disablePacProxy();
   await stopPacHttpServer();
-  const restored = await restoreWindowsSystemProxy();
-  return { proxyRestore: restored.message };
+  const restored = await restoreCaptureProxyFromBackup();
+  if (restored.ok) {
+    return { proxyRestore: restored.message };
+  }
+  disablePacProxy();
+  const legacy = await restoreWindowsSystemProxy();
+  return { proxyRestore: legacy.message };
 }
 
 export async function stopAllCapture(closeSession: boolean): Promise<{ message: string }> {
-  await stopMitm();
+  const mitm = await stopMitm();
   await captureServeStop(closeSession);
-  await stopPacHttpServer();
-  const net = await forceDisableSystemProxy();
-  return { message: `已停止抓包。${net.message}` };
+  const tail = mitm.proxyRestore?.trim() ? mitm.proxyRestore : "已恢复网络设置";
+  return { message: `已停止抓包。${tail}` };
 }
 
 export function getSystemProxyStatus() {

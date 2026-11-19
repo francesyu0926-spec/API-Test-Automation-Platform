@@ -161,6 +161,9 @@ export type AtpApi = {
     hostFilter?: string;
     sessionId?: string;
     setSystemProxy?: boolean;
+    proxyMode?: "pac" | "global" | "embedded";
+    listenPort?: number;
+    autoSwitchPort?: boolean;
   }) => Promise<{
     ok: boolean;
     sessionId?: string;
@@ -168,7 +171,11 @@ export type AtpApi = {
     mitmProxy?: string;
     error?: string;
     messages: string[];
+    startup?: import("../shared/captureStartupTypes").CaptureStartupCheck;
   }>;
+  installCaptureDeps: () => Promise<{ ok: boolean; message: string }>;
+  openRepoRoot: () => Promise<string>;
+  revealMitmCert: () => Promise<{ ok: boolean; certPath?: string; error?: string }>;
   captureDiagnose: (port?: number) => Promise<{
     mitmBinary: string | null;
     mitmRunning: boolean;
@@ -395,6 +402,9 @@ const api: AtpApi = {
   realTrafficGuide: (ingestUrl, port) => ipcRenderer.invoke("atp:realTrafficGuide", ingestUrl, port),
   quickCaptureStart: (opts) => ipcRenderer.invoke("atp:quickCaptureStart", opts),
   captureDiagnose: (port) => ipcRenderer.invoke("atp:captureDiagnose", port),
+  installCaptureDeps: () => ipcRenderer.invoke("atp:installCaptureDeps"),
+  openRepoRoot: () => ipcRenderer.invoke("atp:openRepoRoot"),
+  revealMitmCert: () => ipcRenderer.invoke("atp:revealMitmCert"),
   installMitmCa: () => ipcRenderer.invoke("atp:installMitmCa"),
   copyChromeRestart: () => ipcRenderer.invoke("atp:copyChromeRestart"),
   copyText: (text) => ipcRenderer.invoke("atp:copyText", text),

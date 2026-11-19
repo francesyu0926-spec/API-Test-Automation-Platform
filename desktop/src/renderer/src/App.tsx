@@ -41,6 +41,7 @@ import { normalizeRawBodyDraft } from "./apiWorkbenchModel";
 import { caseYamlToWorkbenchDraft } from "./caseYaml";
 import { importProjectCasesToCollection } from "./importProjectCasesToCollection";
 import AppCustomSelect from "./AppCustomSelect";
+import CaptureRecordingBanner from "./CaptureRecordingBanner";
 import { GlobalEnvSidebar, ProjectEnvProvider, useProjectEnv } from "./ProjectEnvContext";
 
 type Project = Awaited<ReturnType<typeof window.atp.listProjects>>[number];
@@ -203,7 +204,9 @@ export default function App() {
     const atp = window.atp;
     if (!atp?.ensureNetworkDirect) return;
     void atp.ensureNetworkDirect().then((r) => {
-      if (r.messages.length) notify(r.messages.join(" "));
+      if (!r.messages.length) return;
+      const abnormal = r.messages.some((m) => m.includes("异常退出"));
+      notify(r.messages.join(" "), abnormal ? "warn" : undefined);
     });
   }, [notify]);
 
@@ -705,6 +708,7 @@ function AppShell() {
 
   return (
     <div className="layout">
+      <CaptureRecordingBanner onNotify={notify} />
       <a className="skip-to-main" href="#app-main">
         跳到主内容
       </a>

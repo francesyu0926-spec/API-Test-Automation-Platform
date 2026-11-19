@@ -1,4 +1,4 @@
-import { app, BrowserWindow, clipboard, dialog, ipcMain, session, shell } from "electron";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, powerMonitor, session, shell } from "electron";
 import fs from "node:fs/promises";
 import { existsSync } from "node:fs";
 import path from "node:path";
@@ -122,7 +122,14 @@ function createWindow(splash: BrowserWindow | null): void {
   });
 }
 
-app.whenReady().then(() => {
+const DEFAULT_MITM_PORT = 8888;
+
+let appQuitting = false;
+
+app.whenReady().then(async () => {
+  await capture.recoverCaptureOnColdStart(DEFAULT_MITM_PORT);
+  await session.defaultSession.setProxy({ mode: "direct" });
+
   let splash: BrowserWindow | null = null;
   const splashPath = resolveSplashHtmlPath();
   if (splashPath) {
@@ -134,10 +141,6 @@ app.whenReady().then(() => {
     });
   }
   createWindow(splash);
-  void (async () => {
-    await session.defaultSession.setProxy({ mode: "direct" });
-    await capture.recoverStaleCaptureProxy(8888);
-  })();
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow(null);
   });
@@ -147,10 +150,22 @@ app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
 });
 
-app.on("before-quit", () => {
-  wsSession.wsCloseAll();
-  capture.stopIngestOnQuit();
+app.on("before-quit", (e) => {
+  if (appQuitting) return;
+  e.preventDefault();
+  appQuitting = true;
+  void (async () => {
+    wsSession.wsCloseAll();
+    await capture.shutdownCaptureAndRestoreNetwork();
+    app.exit(0);
+  })();
 });
+
+if (process.platform === "win32") {
+  powerMonitor.on("shutdown", () => {
+    void capture.shutdownCaptureAndRestoreNetwork();
+  });
+}
 
 ipcMain.handle("atp:getWorkspace", () => atp.getWorkspaceInfo());
 ipcMain.handle("atp:setRepoRoot", (_e, root: string) => {
@@ -265,10 +280,30 @@ ipcMain.handle(
   "atp:quickCaptureStart",
   (
     _e,
-    opts: { project: string; label?: string; hostFilter?: string; sessionId?: string; setSystemProxy?: boolean },
+    opts: Parameters<typeof capture.quickCaptureStart>[0],
   ) => capture.quickCaptureStart(opts),
 );
+ipcMain.handle(
+  "atp:runCaptureStartupCheck",
+  (
+    _e,
+    opts?: { preferredPort?: number; autoSwitchPort?: boolean },
+  ) => import("./captureStartupPipeline").then((m) => m.runCaptureStartupPipeline(opts)),
+);
+ipcMain.handle("atp:installCaptureDeps", () =>
+  import("./captureStartupPipeline").then((m) => m.installCaptureDependencies()),
+);
+ipcMain.handle("atp:openRepoRoot", () => shell.openPath(getRepoRoot()));
 ipcMain.handle("atp:installMitmCa", () => mitmCert.installMitmCaToUserRoot());
+ipcMain.handle("atp:revealMitmCert", async () => {
+  try {
+    const certPath = await mitmCert.getMitmCaCerPath();
+    shell.showItemInFolder(certPath);
+    return { ok: true, certPath };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+});
 ipcMain.handle("atp:copyText", (_e, text: string) => {
   clipboard.writeText(text);
   return { ok: true };

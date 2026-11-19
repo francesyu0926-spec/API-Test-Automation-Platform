@@ -1,6 +1,6 @@
 function FindProxyForURL(url, host) {
   host = host.toLowerCase();
-  var apis = ["terminal.sfccn.com", "sfccn.com", "cfic.sfccn.com", "vftc.sfccn.com"];
+  var apis = ["www.bidding.shanxiguandian.com"];
   for (var i = 0; i < apis.length; i++) {
     var p = apis[i];
     if (host === p || dnsDomainIs(host, p) || shExpMatch(host, "*." + p)) {

@@ -41,6 +41,8 @@ import {
 import { httpStatusTone } from "./apiWorkbenchModel";
 import type { WorkbenchDraft } from "../../shared/apiWorkbenchTypes";
 import CaptureCodeBlock from "./CaptureCodeBlock";
+import CaptureStartupIssue from "./CaptureStartupIssue";
+import type { CaptureStartupCheck, CaptureStartupActionId } from "../../shared/captureStartupTypes";
 
 const pacHostsStorageKey = (projectId: string) => `atp-capture-pac-hosts:${projectId || "_"}`;
 const PAC_HOSTS_PLACEHOLDER = "api.example.com,api.yourcorp.com";
@@ -171,6 +173,8 @@ export default function CapturePanel({
   const [saveCaseOpen, setSaveCaseOpen] = useState(false);
   const [mitm, setMitm] = useState<Awaited<ReturnType<typeof window.atp.mitmStatus>>>({ running: false });
   const [mitmAvail, setMitmAvail] = useState(false);
+  const [startupIssue, setStartupIssue] = useState<CaptureStartupCheck | null>(null);
+  const [mitmListenPort, setMitmListenPort] = useState(8888);
   const [apiOnlyFilter, setApiOnlyFilter] = useState(true);
   const [followLatest, setFollowLatest] = useState(false);
   const [pendingNewTxCount, setPendingNewTxCount] = useState(0);
@@ -593,14 +597,19 @@ export default function CapturePanel({
     if (opts?.expandPac) setCaptureAdvancedOpen(true);
   }, []);
 
-  const runQuickCaptureStart = async (pacHostsOverride?: string) => {
+  const runQuickCaptureStart = async (
+    pacHostsOverride?: string,
+    opts?: { autoSwitchPort?: boolean; listenPort?: number },
+  ) => {
     if (!project) return;
     setBusy(true);
     setMessage("");
+    setStartupIssue(null);
     const hostFilter =
       proxyMode === "pac" || proxyMode === "embedded"
         ? (pacHostsOverride ?? pacHosts).trim()
         : "";
+    const listenPort = opts?.listenPort ?? mitmListenPort;
     const res = await window.atp.quickCaptureStart({
       project,
       label,
@@ -608,24 +617,75 @@ export default function CapturePanel({
       sessionId: undefined,
       setSystemProxy: true,
       proxyMode,
+      listenPort,
+      autoSwitchPort: opts?.autoSwitchPort ?? false,
     });
     setBusy(false);
     if (!res.ok) {
       const base = res.error ?? "启动失败";
       setMessage(base);
       showDetailToast(base);
-      const d = await window.atp.captureDiagnose(8888);
-      if (d.issues.length) {
-        const full = `${base} · ${d.issues.join("；")}`;
-        setMessage(full);
-        showDetailToast(full);
+      if (res.startup) {
+        setStartupIssue(res.startup);
+      } else {
+        const d = await window.atp.captureDiagnose(listenPort);
+        if (d.issues.length) {
+          const full = `${base} · ${d.issues.join("；")}`;
+          setMessage(full);
+          showDetailToast(full);
+        }
       }
       return;
     }
+    if (res.startup?.listenPort) setMitmListenPort(res.startup.listenPort);
     if (res.sessionId) setSelectedSession(res.sessionId);
+    setStartupIssue(null);
+    if (res.startup?.code === "OK_READY") {
+      showDetailToast(res.startup.message);
+    }
     setMessage("");
     await refreshStatus();
     await refreshIndex();
+  };
+
+  const onStartupAction = async (actionId: CaptureStartupActionId) => {
+    if (!project) return;
+    if (actionId === "install_deps") {
+      setBusy(true);
+      setMessage("正在安装抓包组件…");
+      const r = await window.atp.installCaptureDeps();
+      setBusy(false);
+      showDetailToast(r.message);
+      setMessage(r.message);
+      if (r.ok) setStartupIssue(null);
+      return;
+    }
+    if (actionId === "open_repo") {
+      await window.atp.openRepoRoot();
+      return;
+    }
+    if (actionId === "install_cert") {
+      setBusy(true);
+      const r = await window.atp.installMitmCa();
+      setBusy(false);
+      showDetailToast(r.message);
+      setMessage(r.message);
+      if (r.ok) {
+        setStartupIssue(null);
+        await runQuickCaptureStart();
+      }
+      return;
+    }
+    if (actionId === "export_cert") {
+      const r = await window.atp.revealMitmCert();
+      if (!r.ok) showDetailToast(r.error ?? "无法定位证书文件");
+      return;
+    }
+    if (actionId === "use_new_port") {
+      const port = startupIssue?.suggestedPort ?? mitmListenPort + 1;
+      setMitmListenPort(port);
+      await runQuickCaptureStart(undefined, { autoSwitchPort: true, listenPort: port });
+    }
   };
 
   const onStart = async () => {
@@ -650,12 +710,6 @@ export default function CapturePanel({
     }
     const mitmCheck = await window.atp.mitmAvailability();
     setMitmAvail(mitmCheck.available);
-    if (!mitmCheck.available) {
-      notifyCaptureIssue(
-        "未找到 mitmproxy。在仓库根目录执行：python -m venv .venv && .venv\\Scripts\\pip install -r requirements-capture.txt",
-      );
-      return;
-    }
     if (embeddedMisconfigured) {
       const blocked = embeddedBlockedHosts.join(", ");
       setPendingConfirm({
@@ -997,6 +1051,9 @@ export default function CapturePanel({
         </div>
 
         <div className="capture-control-meta">
+          {startupIssue ? (
+            <CaptureStartupIssue issue={startupIssue} busy={busy} onAction={(id) => void onStartupAction(id)} />
+          ) : null}
           {capturing ? (
             <p className="capture-session-brief">抓包进行中，请在目标客户端内操作；停止后将恢复系统上网设置。</p>
           ) : null}

@@ -19,6 +19,24 @@ async function mitmCaPaths(): Promise<{ cer: string; pem: string; dir: string }>
   };
 }
 
+export async function isMitmCaTrusted(): Promise<boolean> {
+  if (process.platform !== "win32") return true;
+  try {
+    const { stdout } = await execFileAsync("certutil", ["-store", "-user", "Root"], {
+      encoding: "utf8",
+      windowsHide: true,
+      timeout: 45000,
+    });
+    return /mitmproxy/i.test(stdout);
+  } catch {
+    return false;
+  }
+}
+
+export async function getMitmCaCerPath(): Promise<string> {
+  return ensureCaGenerated();
+}
+
 async function ensureCaGenerated(): Promise<string> {
   const { cer, pem, dir } = await mitmCaPaths();
   try {
